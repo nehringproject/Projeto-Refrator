@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Refrator</string>
+    <string name="accessibility_service_description">Permite ao agente autorizado ler a interface e executar gestos. Senhas e campos protegidos não são expostos.</string>
+</resources>
