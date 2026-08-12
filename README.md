@@ -2,6 +2,8 @@
 
 Refrator is an Android agent workspace with multi-provider chat, local GGUF
 models, tools, persistent tasks, Python, LiteLLM and optional Shizuku support.
+The optional Linux command-line environment is downloaded from a pinned official
+Termux release on first use and verified by size and SHA-256.
 
 ## Requirements
 

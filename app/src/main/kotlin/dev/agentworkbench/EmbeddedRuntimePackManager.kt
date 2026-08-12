@@ -16,9 +16,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Self-contained Linux toolchains for Refrator. The bootstrap is immutable,
- * bundled with the signed APK, and extracted into app-private storage. Downloaded
- * compiler packages are executed through Android's immutable system linker, so
+ * Self-contained Linux toolchains for Refrator. The bootstrap is downloaded on
+ * first use from a pinned official Termux release and extracted into app-private
+ * storage. Downloaded compiler packages are executed through Android's immutable system linker, so
  * targetSdk 36 keeps its W^X protection and no Termux app or root is required.
  */
 internal class EmbeddedRuntimePackManager(
@@ -48,7 +48,7 @@ internal class EmbeddedRuntimePackManager(
     override fun status(): JSONObject = JSONObject()
         .put("supported", Build.SUPPORTED_64_BIT_ABIS.contains("arm64-v8a"))
         .put("architecture", Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
-        .put("backend", "signed_bootstrap_system_linker")
+        .put("backend", "pinned_official_bootstrap_system_linker")
         .put("requires_termux", false)
         .put("requires_root", false)
         .put("w_x_policy", "Android targetSdk 36 preserved; writable ELF runs through /system/bin/linker64")
@@ -143,12 +143,17 @@ internal class EmbeddedRuntimePackManager(
             fixConfiguration()
             return
         }
-        onProgress("Preparando runtime Linux interno assinado...")
+        onProgress("Baixando Linux base oficial (32 MB)...")
         val staging = File(root.parentFile, "${root.name}-staging")
         staging.deleteRecursively()
         val stagingPrefix = File(staging, "usr")
         val links = mutableListOf<Pair<String, String>>()
-        context.assets.open(BOOTSTRAP_ASSET).use { raw ->
+        val bootstrap = File(context.cacheDir, "refrator-runtime/$BOOTSTRAP_FILE").apply {
+            parentFile?.mkdirs()
+        }
+        downloadPinnedBootstrap(bootstrap)
+        onProgress("Verificando e preparando Linux base...")
+        bootstrap.inputStream().use { raw ->
             ZipInputStream(raw.buffered()).use { zip ->
                 while (true) {
                     val entry = zip.nextEntry ?: break
@@ -170,6 +175,7 @@ internal class EmbeddedRuntimePackManager(
                 }
             }
         }
+        bootstrap.delete()
         links.forEach { (rawTarget, rawLink) ->
             val link = File(stagingPrefix, rawLink)
             link.parentFile?.mkdirs()
@@ -186,6 +192,50 @@ internal class EmbeddedRuntimePackManager(
         fixConfiguration()
         check(bash.isFile) { "Bootstrap extraido sem bash." }
         run("echo AWB_LINUX_RUNTIME_OK", 30_000)
+    }
+
+    private fun downloadPinnedBootstrap(destination: File) {
+        destination.delete()
+        val connection = URL(BOOTSTRAP_URL).openConnection() as HttpURLConnection
+        connection.connectTimeout = 20_000
+        connection.readTimeout = 120_000
+        connection.instanceFollowRedirects = true
+        connection.useCaches = false
+        connection.setRequestProperty("User-Agent", "Refrator-Runtime/${BuildConfig.VERSION_NAME} Android")
+        connection.setRequestProperty("Accept", "application/zip")
+        try {
+            require(connection.responseCode in 200..299) {
+                "Download do Linux base falhou: HTTP ${connection.responseCode}."
+            }
+            require(connection.contentLengthLong <= 0 || connection.contentLengthLong == BOOTSTRAP_SIZE) {
+                "Tamanho inesperado do Linux base."
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+            var total = 0L
+            connection.inputStream.buffered().use { input ->
+                FileOutputStream(destination).buffered().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total = Math.addExact(total, count.toLong())
+                        require(total <= BOOTSTRAP_SIZE) { "Linux base excedeu o tamanho esperado." }
+                        digest.update(buffer, 0, count)
+                        output.write(buffer, 0, count)
+                    }
+                }
+            }
+            require(total == BOOTSTRAP_SIZE) { "Download incompleto do Linux base." }
+            val actual = digest.digest().joinToString("") { "%02x".format(it) }
+            require(actual.equals(BOOTSTRAP_SHA256, ignoreCase = true)) {
+                "Assinatura SHA-256 do Linux base nao confere."
+            }
+        } catch (error: Throwable) {
+            destination.delete()
+            throw error
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun fixConfiguration() {
@@ -373,7 +423,10 @@ internal class EmbeddedRuntimePackManager(
     )
 
     private companion object {
-        const val BOOTSTRAP_ASSET = "bootstrap-aarch64.zip"
+        const val BOOTSTRAP_FILE = "bootstrap-aarch64.zip"
+        const val BOOTSTRAP_URL = "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.08.09-r1%2Bapt.android-7/bootstrap-aarch64.zip"
+        const val BOOTSTRAP_SHA256 = "1670fa370d49b5f8da2dfaad547c1e892fd91397c6e2f836f1f27f55e83206e0"
+        const val BOOTSTRAP_SIZE = 32_098_003L
         const val TERMUX_PREFIX = "/data/data/com.termux/files/usr"
         const val INSTALL_TIMEOUT_MS = 1_800_000L
         const val MAX_OUTPUT = 512_000

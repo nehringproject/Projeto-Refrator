@@ -1,5 +1,3 @@
-import java.security.MessageDigest
-
 plugins {
     id("com.android.application")
     id("com.google.devtools.ksp")
@@ -107,44 +105,6 @@ android {
         )
     }
 
-    sourceSets {
-        listOf("dev", "public").forEach { variant ->
-            getByName(variant).apply {
-                assets.directories.add(rootProject.file("runtime-assets").absolutePath)
-            }
-        }
-    }
-
-}
-
-val verifyRuntimeBootstrap = tasks.register("verifyRuntimeBootstrap") {
-    val bootstrap = rootProject.file("runtime-assets/bootstrap-aarch64.zip")
-    inputs.file(bootstrap)
-    doLast {
-        require(bootstrap.isFile) { "Runtime bootstrap ausente: ${bootstrap.path}" }
-        val digest = MessageDigest.getInstance("SHA-256")
-        bootstrap.inputStream().buffered().use { input ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                digest.update(buffer, 0, count)
-            }
-        }
-        val actual = digest.digest().joinToString("") { byte: Byte -> "%02x".format(byte) }
-        require(actual == "ea2aeba8819e517db711f8c32369e89e7c52cee73e07930ff91185e1ab93f4f3") {
-            "SHA-256 do runtime bootstrap divergente: $actual"
-        }
-    }
-}
-
-tasks.configureEach {
-    // Debug builds remain reproducible from source without redistributing the
-    // separately licensed command-line bundle. Release builds require the
-    // reviewed archive and verify its digest before packaging.
-    if (name == "preDevReleaseBuild" || name == "prePublicReleaseBuild") {
-        dependsOn(verifyRuntimeBootstrap)
-    }
 }
 
 ksp {

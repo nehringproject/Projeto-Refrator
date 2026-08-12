@@ -24,17 +24,13 @@ built Python distribution remain authoritative. The small Android compatibility
 packages under `python-runtime/*-android` are part of Refrator and use the root
 license; they are not upstream releases of similarly named projects.
 
-## Embedded command-line runtime
+## Optional command-line runtime
 
-`runtime-assets/bootstrap-aarch64.zip` contains unmodified Termux packages with
-multiple licenses, including GPL and LGPL families. Its installed package
-database is stored at `var/lib/dpkg/status`; package copyright and license files
-are retained under `share/doc`.
-
-Distributing an APK which embeds this archive requires corresponding source for
-the exact binaries, including the Termux build recipes and modifications used.
-See `runtime-assets/SOURCE_OFFER.md`. A release must not be published until that
-gate is satisfied.
+The APK does not contain the Termux bootstrap. When the user installs the Linux
+base, Refrator downloads a pinned architecture-specific archive directly from
+the official `termux/termux-packages` GitHub release and verifies its exact size
+and SHA-256 before extraction. Those downloaded packages retain their upstream
+licenses and source availability from the Termux project.
 
 ## Models and user downloads
 

@@ -1,7 +1,4 @@
-param(
-    [switch]$RequireRuntimeSourceBundle,
-    [string]$Apk
-)
+param([string]$Apk)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -18,14 +15,6 @@ try {
     )
     $missing = @($required | Where-Object { -not (Test-Path -LiteralPath $_) })
     if ($missing) { throw "Required publication files are missing: $($missing -join ', ')" }
-
-    $runtimeArchive = "runtime-assets/bootstrap-aarch64.zip"
-    $actualRuntime = $null
-    if (Test-Path -LiteralPath $runtimeArchive) {
-        $expectedRuntime = "ea2aeba8819e517db711f8c32369e89e7c52cee73e07930ff91185e1ab93f4f3"
-        $actualRuntime = (Get-FileHash $runtimeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualRuntime -ne $expectedRuntime) { throw "Embedded runtime checksum mismatch." }
-    }
 
     $publishable = @(git ls-files --cached --others --exclude-standard)
     if ($LASTEXITCODE -ne 0) { throw "git ls-files failed." }
@@ -60,15 +49,6 @@ try {
     }
     if ($violations.Count) { throw ($violations -join [Environment]::NewLine) }
 
-    if ($RequireRuntimeSourceBundle) {
-        if (-not (Test-Path -LiteralPath $runtimeArchive)) {
-            throw "Runtime archive is required for an APK release."
-        }
-        if (-not (Test-Path -LiteralPath "runtime-sources/manifest.json")) {
-            throw "Runtime corresponding-source bundle is required before publishing an APK."
-        }
-    }
-
     if ($Apk) {
         if (-not (Test-Path -LiteralPath $Apk)) { throw "APK not found: $Apk" }
         Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -102,7 +82,6 @@ try {
 
     "Public source audit: PASS"
     "Publishable files: $($publishable.Count)"
-    if ($actualRuntime) { "Runtime SHA-256: $actualRuntime" }
 } finally {
     Pop-Location
 }
