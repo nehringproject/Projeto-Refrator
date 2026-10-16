@@ -446,6 +446,7 @@ internal fun ProviderSettings.toRunSnapshotJson(): String = JSONObject()
     .put("endpoint", endpoint)
     .put("model_id", modelId)
     .put("execution_mode", executionMode.name)
+    .put("reasoning_effort", reasoningEffort.name)
     .put(
         "continuous_chat",
         JSONObject()
@@ -484,6 +485,10 @@ internal fun providerSettingsFromRunSnapshot(raw: String): ProviderSettings {
             recentMessagesToKeep = continuous.getInt("recent_messages_to_keep"),
             providerPool = pool,
         ),
+        // Optional field: snapshots written before it existed fall back to the default.
+        reasoningEffort = root.optString("reasoning_effort")
+            .let { name -> dev.agentworkbench.core.ReasoningEffort.entries.firstOrNull { it.name == name } }
+            ?: dev.agentworkbench.core.ReasoningEffort.DEFAULT,
     )
 }
 

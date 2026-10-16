@@ -31,7 +31,19 @@ data class ProviderRequest(
     val messages: List<ProviderMessage>,
     val tools: List<ToolDefinition>,
     val providerContinuation: Map<String, String> = emptyMap(),
+    val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
 )
+
+/**
+ * Requested thinking budget. [DEFAULT] sends nothing, so providers that reject
+ * unknown parameters keep working exactly as before.
+ */
+enum class ReasoningEffort(val wireValue: String?, val label: String) {
+    DEFAULT(null, "Padrão"),
+    LOW("low", "Baixo"),
+    MEDIUM("medium", "Médio"),
+    HIGH("high", "Alto"),
+}
 
 data class ToolDefinition(
     val name: String,

@@ -226,6 +226,7 @@ class AgentBackgroundEngine(
                             ),
                         tools = toolbox.definitions,
                         providerContinuation = state.continuation,
+                        reasoningEffort = route.settings.reasoningEffort,
                     )
                     route.provider.stream(request).collect { event ->
                         when (event) {

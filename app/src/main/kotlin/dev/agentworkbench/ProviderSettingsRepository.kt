@@ -6,6 +6,7 @@ import android.os.Build
 import android.util.Base64
 import dev.agentworkbench.core.ModelProvider
 import dev.agentworkbench.core.ExecutionMode
+import dev.agentworkbench.core.ReasoningEffort
 import dev.agentworkbench.provider.http.DemoModelProvider
 import dev.agentworkbench.provider.http.EndpointPolicy
 import dev.agentworkbench.provider.http.EndpointValidation
@@ -182,6 +183,7 @@ data class ProviderSettings(
     val modelId: String,
     val executionMode: ExecutionMode,
     val continuousChat: ContinuousChatSettings = ContinuousChatSettings(),
+    val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
 )
 
 data class ContinuousChatSettings(
@@ -251,6 +253,7 @@ class ProviderSettingsRepository(
                     ExecutionMode.BUILD
                 },
             continuousChat = loadContinuousChatSettings(),
+            reasoningEffort = loadReasoningEffort(),
         )
     }
 
@@ -274,6 +277,7 @@ class ProviderSettingsRepository(
                 ExecutionMode.BUILD
             },
             continuousChat = loadContinuousChatSettings(),
+            reasoningEffort = loadReasoningEffort(),
         )
 
     fun save(
@@ -311,6 +315,7 @@ class ProviderSettingsRepository(
             .putString(KEY_ENDPOINT, settings.endpoint.trim())
             .putString(KEY_MODEL, modelId)
             .putString(KEY_EXECUTION_MODE, settings.executionMode.name)
+            .putString(KEY_REASONING_EFFORT, settings.reasoningEffort.name)
             .putString(profileEndpointKey(settings.preset), settings.endpoint.trim())
             .putString(profileModelKey(settings.preset), modelId)
             .putBoolean(profileSavedKey(settings.preset), true)
@@ -459,6 +464,17 @@ class ProviderSettingsRepository(
             .putString(KEY_EXECUTION_MODE, mode.name)
             .apply()
     }
+
+    fun saveReasoningEffort(effort: ReasoningEffort) {
+        preferences.edit()
+            .putString(KEY_REASONING_EFFORT, effort.name)
+            .apply()
+    }
+
+    private fun loadReasoningEffort(): ReasoningEffort =
+        preferences.getString(KEY_REASONING_EFFORT, null)
+            ?.let { runCatching { ReasoningEffort.valueOf(it) }.getOrNull() }
+            ?: ReasoningEffort.DEFAULT
 
     fun buildProviderRoutes(
         active: ProviderSettings,
@@ -1026,6 +1042,7 @@ class ProviderSettingsRepository(
         ),
         executionMode = active.executionMode,
         continuousChat = active.continuousChat,
+        reasoningEffort = active.reasoningEffort,
     )
 
     private fun normalizedProviderModel(preset: ProviderPreset, model: String): String = when {
@@ -1139,6 +1156,7 @@ class ProviderSettingsRepository(
         const val KEY_ENDPOINT = "endpoint"
         const val KEY_MODEL = "model"
         const val KEY_EXECUTION_MODE = "execution_mode"
+        const val KEY_REASONING_EFFORT = "reasoning_effort"
         const val KEY_INSTALL_ID = "install_id"
         const val KEY_CONTINUOUS_ENABLED = "continuous_enabled"
         const val KEY_CONTINUOUS_AUTO_SWITCH = "continuous_auto_switch"

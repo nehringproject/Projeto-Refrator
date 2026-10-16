@@ -76,9 +76,15 @@ object EndpointPolicy {
     }
 
     private fun isLocalHost(rawHost: String): Boolean {
-        val host = rawHost.removePrefix("[").removeSuffix("]").lowercase()
-        if (host == "localhost" || host.endsWith(".local")) return true
+        val host = rawHost.removePrefix("[").removeSuffix("]").lowercase().trimEnd('.')
+        if (host == "localhost" || host.endsWith(".localhost")) return true
+        // RFC 6762 (mDNS), RFC 8375 (home networks) and the common router suffix.
+        if (LOCAL_NAME_SUFFIXES.any(host::endsWith)) return true
         if (host == "::1") return true
+        // IPv4-mapped IPv6 (::ffff:a.b.c.d) inherits the locality of the embedded IPv4.
+        if (host.startsWith(IPV4_MAPPED_PREFIX)) {
+            return isLocalHost(host.removePrefix(IPV4_MAPPED_PREFIX))
+        }
         if (
             host.startsWith("fc") ||
             host.startsWith("fd") ||
@@ -96,6 +102,9 @@ object EndpointPolicy {
         if (octets.size != 4 || octets.any { it !in 0..255 }) return false
         return when {
             octets[0] == 10 -> true
+            // Carrier-grade NAT range used by Tailscale/Headscale tailnets, which are
+            // already end-to-end encrypted by WireGuard.
+            octets[0] == 100 && octets[1] in 64..127 -> true
             octets[0] == 127 -> true
             octets[0] == 169 && octets[1] == 254 -> true
             octets[0] == 172 && octets[1] in 16..31 -> true
@@ -106,6 +115,8 @@ object EndpointPolicy {
 
     private fun rejected(reason: String) = EndpointValidation.Rejected(reason)
 
+    private val LOCAL_NAME_SUFFIXES = listOf(".local", ".home.arpa", ".lan")
+    private const val IPV4_MAPPED_PREFIX = "::ffff:"
     private const val MAX_ENDPOINT_LENGTH = 2_048
     private const val MAX_MODEL_ID_LENGTH = 200
     private const val MAX_TOKEN_LENGTH = 4_096

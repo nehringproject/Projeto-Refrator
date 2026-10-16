@@ -430,6 +430,7 @@ private fun AgentWorkbenchShell(
                                 onOpenSettings = ::openSettings,
                                 onSessionSaved = ::mergeSummary,
                                 onBusyChanged = { chatBusy = it },
+                                onSettingsChange = { settings = it },
                             )
                         }
                     }

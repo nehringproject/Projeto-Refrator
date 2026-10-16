@@ -191,7 +191,7 @@ class HttpModelProvider(
                 // transmite os eventos response.reasoning_*.delta — o parser abaixo ficava
                 // esperando um evento que a API não tinha motivo pra mandar.
                 JSONObject()
-                    .put("effort", "medium")
+                    .put("effort", request.reasoningEffort.wireValue ?: "medium")
                     .put("summary", "auto"),
             )
             .put(
@@ -231,6 +231,9 @@ class HttpModelProvider(
             )
             .put("messages", chatMessagesJson(request))
             .apply {
+                // Only sent on explicit choice: many OpenAI-compatible servers reject
+                // unknown fields, so the default request stays byte-identical.
+                request.reasoningEffort.wireValue?.let { put("reasoning_effort", it) }
                 if (request.tools.isNotEmpty()) {
                     put(
                         "tools",

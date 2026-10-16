@@ -1,6 +1,8 @@
 package dev.agentworkbench
 
 import dev.agentworkbench.core.ExecutionMode
+import dev.agentworkbench.core.ReasoningEffort
+import org.json.JSONObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -22,9 +24,28 @@ class ExecutionSnapshotTest {
                 recentMessagesToKeep = 9,
                 providerPool = linkedSetOf(ProviderPreset.GROQ, ProviderPreset.LOCAL_GGUF),
             ),
+            reasoningEffort = ReasoningEffort.HIGH,
         )
 
         assertEquals(original, providerSettingsFromRunSnapshot(original.toRunSnapshotJson()))
+    }
+
+    @Test
+    fun snapshotsWrittenBeforeReasoningEffortFallBackToDefault() {
+        val legacy = JSONObject(
+            ProviderSettings(
+                preset = ProviderPreset.GROQ,
+                endpoint = ProviderPreset.GROQ.defaultEndpoint,
+                modelId = ProviderPreset.GROQ.defaultModel,
+                executionMode = ExecutionMode.BUILD,
+                reasoningEffort = ReasoningEffort.LOW,
+            ).toRunSnapshotJson(),
+        ).apply { remove("reasoning_effort") }.toString()
+
+        assertEquals(
+            ReasoningEffort.DEFAULT,
+            providerSettingsFromRunSnapshot(legacy).reasoningEffort,
+        )
     }
 
     @Test

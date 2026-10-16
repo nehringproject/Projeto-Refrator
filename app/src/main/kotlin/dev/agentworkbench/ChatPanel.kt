@@ -111,6 +111,10 @@ import dev.agentworkbench.core.ProviderRequest
 import dev.agentworkbench.core.ProviderToolCall
 import dev.agentworkbench.core.ToolDefinition
 import dev.agentworkbench.core.ExecutionMode
+import dev.agentworkbench.core.ReasoningEffort
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeCap
 import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -242,6 +246,7 @@ fun ChatPanel(
     onOpenSettings: () -> Unit,
     onSessionSaved: (ChatSessionSummary) -> Unit,
     onBusyChanged: (Boolean) -> Unit,
+    onSettingsChange: (ProviderSettings) -> Unit = {},
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -270,6 +275,10 @@ fun ChatPanel(
     var attachError by remember(sessionId) { mutableStateOf<String?>(null) }
     var attachBusy by remember(sessionId) { mutableStateOf(false) }
     var attachments by remember(sessionId) { mutableStateOf<List<PendingAttachment>>(emptyList()) }
+    // Tokens ocupados na janela do modelo: estimativa local antes do envio, trocada pelo
+    // valor real assim que o provider reporta Usage.
+    var contextUsage by remember(sessionId) { mutableStateOf<ContextUsage?>(null) }
+    val contextWindowTokens = remember(settings) { repository.effectiveContextWindowTokens(settings) }
     fun handleAttachment(uri: Uri?) {
         if (uri == null) return
         val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
@@ -558,6 +567,13 @@ fun ChatPanel(
                     )
                 }
             }
+            contextUsage = ContextUsage(
+                tokens = ContinuousChatEngine.estimateTokens(
+                    messages = listOf(environment) + providerLedger,
+                    tools = toolbox.definitions,
+                ).toLong(),
+                exact = false,
+            )
             val request = ProviderRequest(
                 // Preserve the native KV-cache for the whole local conversation. A per-turn
                 // id forced a complete model and system-prompt reload after every message.
@@ -568,6 +584,7 @@ fun ChatPanel(
                     settings.continuousChat,
                 ),
                 tools = toolbox.definitions,
+                reasoningEffort = route.settings.reasoningEffort,
             )
             provider.stream(request).collect { event ->
                 when (event) {
@@ -605,7 +622,12 @@ fun ChatPanel(
                             turnId = turnId,
                             event = event,
                         )
-                        if (event !is ProviderEvent.Usage) {
+                        if (event is ProviderEvent.Usage) {
+                            contextUsage = ContextUsage(
+                                tokens = event.inputTokens + event.outputTokens,
+                                exact = true,
+                            )
+                        } else {
                             providerStatus = statusFor(event)
                         }
                     }
@@ -1395,6 +1417,22 @@ fun ChatPanel(
             attachBusy = attachBusy,
             attachError = attachError,
             attachments = attachments,
+            executionMode = settings.executionMode,
+            reasoningEffort = settings.reasoningEffort,
+            reasoningSupported = settings.preset != ProviderPreset.DEMO &&
+                settings.preset != ProviderPreset.LOCAL_GGUF,
+            contextUsage = contextUsage,
+            contextWindowTokens = contextWindowTokens,
+            compactionThresholdPercent = settings.continuousChat.compactionThresholdPercent
+                .takeIf { settings.continuousChat.enabled },
+            onExecutionModeChange = { mode ->
+                repository.saveExecutionMode(mode)
+                onSettingsChange(settings.copy(executionMode = mode))
+            },
+            onReasoningEffortChange = { effort ->
+                repository.saveReasoningEffort(effort)
+                onSettingsChange(settings.copy(reasoningEffort = effort))
+            },
             onRemoveAttachment = { removed -> attachments = attachments - removed },
             onPromptChange = { prompt = it },
             onStop = ::requestStop,
@@ -2451,6 +2489,14 @@ private fun Composer(
     attachBusy: Boolean,
     attachError: String?,
     attachments: List<PendingAttachment>,
+    executionMode: ExecutionMode,
+    reasoningEffort: ReasoningEffort,
+    reasoningSupported: Boolean,
+    contextUsage: ContextUsage?,
+    contextWindowTokens: Int,
+    compactionThresholdPercent: Int?,
+    onExecutionModeChange: (ExecutionMode) -> Unit,
+    onReasoningEffortChange: (ReasoningEffort) -> Unit,
     onRemoveAttachment: (PendingAttachment) -> Unit,
     onPromptChange: (String) -> Unit,
     onStop: () -> Unit,
@@ -2627,18 +2673,271 @@ private fun Composer(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.error,
             )
-            else -> Text(
-                text = if (isStreaming) {
-                    "Agente em execução · toque no botão vermelho para parar"
-                } else {
-                    "Execução local e remota · revise ações importantes"
-                },
-                modifier = Modifier.fillMaxWidth().padding(start = 4.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = WorkbenchTokens.TextFaint,
+            else -> ComposerControls(
+                // Trocar modo ou raciocínio no meio de um turno recriaria o toolbox em uso.
+                enabled = !isStreaming,
+                executionMode = executionMode,
+                reasoningEffort = reasoningEffort,
+                reasoningSupported = reasoningSupported,
+                contextUsage = contextUsage,
+                contextWindowTokens = contextWindowTokens,
+                compactionThresholdPercent = compactionThresholdPercent,
+                onExecutionModeChange = onExecutionModeChange,
+                onReasoningEffortChange = onReasoningEffortChange,
             )
         }
     }
+}
+
+internal data class ContextUsage(val tokens: Long, val exact: Boolean)
+
+private data class ComposerModeOption(
+    val mode: ExecutionMode,
+    val label: String,
+    val description: String,
+)
+
+private val composerModes = listOf(
+    ComposerModeOption(ExecutionMode.PLAN, "Planejar", "Só investiga; bloqueia qualquer mudança"),
+    ComposerModeOption(ExecutionMode.BUILD, "Confirmar", "Pede aprovação para escrita, rede e shell"),
+    ComposerModeOption(ExecutionMode.AUTO, "Auto", "Aprova sozinho mudanças reversíveis no workspace"),
+    ComposerModeOption(
+        ExecutionMode.FULL,
+        "Ignorar permissões",
+        "Executa sem perguntar; só ações destrutivas ainda confirmam",
+    ),
+)
+
+private fun composerModeColor(mode: ExecutionMode): Color = when (mode) {
+    ExecutionMode.FULL -> WorkbenchTokens.Red
+    ExecutionMode.AUTO -> WorkbenchTokens.Gold
+    ExecutionMode.PLAN -> WorkbenchTokens.Purple
+    else -> WorkbenchTokens.Green
+}
+
+@Composable
+private fun ComposerControls(
+    enabled: Boolean,
+    executionMode: ExecutionMode,
+    reasoningEffort: ReasoningEffort,
+    reasoningSupported: Boolean,
+    contextUsage: ContextUsage?,
+    contextWindowTokens: Int,
+    compactionThresholdPercent: Int?,
+    onExecutionModeChange: (ExecutionMode) -> Unit,
+    onReasoningEffortChange: (ReasoningEffort) -> Unit,
+) {
+    var modeMenuOpen by remember { mutableStateOf(false) }
+    var reasoningMenuOpen by remember { mutableStateOf(false) }
+    var contextDetailsOpen by remember { mutableStateOf(false) }
+    val modeLabel = composerModes.firstOrNull { it.mode == executionMode }?.label
+        ?: executionMode.name.lowercase()
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Box {
+                ComposerChip(
+                    text = modeLabel,
+                    dotColor = composerModeColor(executionMode),
+                    enabled = enabled,
+                    description = "Modo de permissões: $modeLabel",
+                    onClick = { modeMenuOpen = true },
+                )
+                DropdownMenu(expanded = modeMenuOpen, onDismissRequest = { modeMenuOpen = false }) {
+                    composerModes.forEach { option ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        text = (if (option.mode == executionMode) "✓ " else "") + option.label,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = composerModeColor(option.mode),
+                                    )
+                                    Text(
+                                        text = option.description,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = WorkbenchTokens.TextMuted,
+                                    )
+                                }
+                            },
+                            onClick = {
+                                modeMenuOpen = false
+                                if (option.mode != executionMode) onExecutionModeChange(option.mode)
+                            },
+                        )
+                    }
+                }
+            }
+            if (reasoningSupported) {
+                Box {
+                    ComposerChip(
+                        text = "Raciocínio: ${reasoningEffort.label}",
+                        dotColor = null,
+                        enabled = enabled,
+                        description = "Nível de raciocínio: ${reasoningEffort.label}",
+                        onClick = { reasoningMenuOpen = true },
+                    )
+                    DropdownMenu(
+                        expanded = reasoningMenuOpen,
+                        onDismissRequest = { reasoningMenuOpen = false },
+                    ) {
+                        ReasoningEffort.entries.forEach { effort ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(
+                                            text = (if (effort == reasoningEffort) "✓ " else "") + effort.label,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                        Text(
+                                            text = when (effort) {
+                                                ReasoningEffort.DEFAULT -> "O provedor decide"
+                                                ReasoningEffort.LOW -> "Respostas mais rápidas e baratas"
+                                                ReasoningEffort.MEDIUM -> "Equilíbrio entre velocidade e qualidade"
+                                                ReasoningEffort.HIGH -> "Pensa mais antes de responder"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = WorkbenchTokens.TextMuted,
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    reasoningMenuOpen = false
+                                    if (effort != reasoningEffort) onReasoningEffortChange(effort)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Box {
+            ContextUsageIndicator(
+                usage = contextUsage,
+                windowTokens = contextWindowTokens,
+                onClick = { contextDetailsOpen = true },
+            )
+            DropdownMenu(
+                expanded = contextDetailsOpen,
+                onDismissRequest = { contextDetailsOpen = false },
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("Uso de contexto", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = contextUsage?.let {
+                            "%,d tokens%s".format(it.tokens, if (it.exact) "" else " (estimado)")
+                        } ?: "Nenhuma mensagem enviada ainda",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        text = "Janela do modelo: %,d tokens".format(contextWindowTokens),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = WorkbenchTokens.TextMuted,
+                    )
+                    Text(
+                        text = compactionThresholdPercent
+                            ?.let { "Compactação automática ao atingir $it%" }
+                            ?: "Compactação automática desligada (Configurações › Chat contínuo)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WorkbenchTokens.TextMuted,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposerChip(
+    text: String,
+    dotColor: Color?,
+    enabled: Boolean,
+    description: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(WorkbenchTokens.SurfaceHigh)
+            .clickable(enabled = enabled, onClick = onClick)
+            .semantics { contentDescription = description }
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (dotColor != null) {
+            Box(modifier = Modifier.size(6.dp).background(dotColor, CircleShape))
+        }
+        Text(
+            text = "$text ▾",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (enabled) WorkbenchTokens.Text else WorkbenchTokens.TextFaint,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun ContextUsageIndicator(
+    usage: ContextUsage?,
+    windowTokens: Int,
+    onClick: () -> Unit,
+) {
+    val fraction = usage
+        ?.let { (it.tokens.toFloat() / windowTokens.coerceAtLeast(1)).coerceIn(0f, 1f) }
+        ?: 0f
+    val color = when {
+        fraction >= 0.85f -> WorkbenchTokens.Red
+        fraction >= 0.6f -> WorkbenchTokens.Gold
+        else -> WorkbenchTokens.Green
+    }
+    val percent = (fraction * 100).toInt()
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = "Uso de contexto: $percent por cento" }
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Canvas(modifier = Modifier.size(14.dp)) {
+            val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+            drawArc(WorkbenchTokens.Border, 0f, 360f, useCenter = false, style = stroke)
+            if (fraction > 0f) {
+                drawArc(color, -90f, 360f * fraction, useCenter = false, style = stroke)
+            }
+        }
+        Text(
+            text = usage?.let {
+                (if (it.exact) "" else "~") +
+                    "${compactTokens(it.tokens)}/${compactTokens(windowTokens.toLong())} · $percent%"
+            } ?: "0/${compactTokens(windowTokens.toLong())}",
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = WorkbenchTokens.TextMuted,
+            maxLines = 1,
+        )
+    }
+}
+
+private fun compactTokens(value: Long): String = when {
+    value >= 1_000_000 -> "%.1fM".format(value / 1_000_000.0)
+    value >= 10_000 -> "${value / 1_000}k"
+    value >= 1_000 -> "%.1fk".format(value / 1_000.0)
+    else -> value.toString()
 }
 
 private fun parseAgentQuestion(

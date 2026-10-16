@@ -288,6 +288,11 @@ class EmbeddedLiteLlmModelProvider(
         .put("model", routerModel)
         .put("messages", JSONArray().apply { request.messages.forEach { put(messageJson(it)) } })
         .apply {
+            request.reasoningEffort.wireValue?.let {
+                put("reasoning_effort", it)
+                // LiteLLM raises for models without reasoning support unless told to drop it.
+                put("drop_params", true)
+            }
             if (deployments.isEmpty()) {
                 apiKey?.takeIf(String::isNotBlank)?.let { put("api_key", it) }
             } else {
