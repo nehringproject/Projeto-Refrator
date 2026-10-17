@@ -15,3 +15,6 @@
 *.whl binary
 *.traineddata binary
 *.so binary
+
+# Shell scripts packaged into the APK must keep LF, or bash fails on .
+app/src/main/assets/terminal/** text eol=lf
