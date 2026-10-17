@@ -50,6 +50,11 @@ android {
             dimension = "distribution"
             applicationId = "dev.agentworkbench.power"
             versionNameSuffix = "-dev"
+            // Sideload-only power build: targetSdk 28 keeps the untrusted_app_27 SELinux domain,
+            // which may execve() binaries in app storage. That is what proot/proot-distro and the
+            // native musl/glibc CLIs (Codex, Claude Code) need. Public stays on the current target
+            // and keeps W^X through /system/bin/linker64.
+            targetSdk = 28
             buildConfigField("String", "DISTRIBUTION", "\"dev\"")
             buildConfigField("boolean", "FULL_CAPABILITIES", "true")
             buildConfigField("boolean", "DEVELOPER_BUILD", "true")
@@ -85,6 +90,11 @@ android {
                 "proguard-rules.pro",
             )
         }
+    }
+
+    lint {
+        // The Dev flavor deliberately targets SDK 28 (see above); Public is unaffected.
+        disable += "ExpiredTargetSdkVersion"
     }
 
     buildFeatures {
@@ -138,6 +148,7 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     implementation(libs.androidx.work.runtime)
     implementation(libs.androidx.webkit)
+    implementation(libs.termux.terminal.view)
     implementation(libs.kotlinx.coroutines.android)
     ksp(libs.androidx.room.compiler)
     debugImplementation(libs.androidx.compose.ui.tooling)

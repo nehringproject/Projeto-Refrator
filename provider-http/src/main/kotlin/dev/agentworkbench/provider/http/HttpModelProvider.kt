@@ -117,7 +117,7 @@ class HttpModelProvider(
         connection.setRequestProperty("Accept", "text/event-stream")
         connection.setRequestProperty("Cache-Control", "no-cache")
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-        config.authorizationToken?.let { token ->
+        (config.tokenProvider?.invoke() ?: config.authorizationToken)?.let { token ->
             connection.setRequestProperty("Authorization", "Bearer $token")
         }
 
@@ -141,8 +141,13 @@ class HttpModelProvider(
         }
 
         val contentType = connection.contentType.orEmpty().lowercase()
-        if (!contentType.contains("text/event-stream")) {
-            emit(ProviderEvent.Failed(false, "Provider did not return an SSE stream"))
+        // Some routes stream SSE without declaring a Content-Type at all, so only an explicit
+        // non-SSE type (JSON, HTML…) takes the buffered path below.
+        if (contentType.isNotBlank() && !contentType.contains("text/event-stream")) {
+            val body = connection.inputStream
+                .bufferedReader(StandardCharsets.UTF_8)
+                .use { readBounded(it, MAX_ERROR_BODY_CHARS * 64) }
+            nonStreamingEvents(contentType, body, status).forEach { emit(it) }
             return
         }
 
@@ -169,22 +174,84 @@ class HttpModelProvider(
         when {
             call.cancelled.get() -> emit(ProviderEvent.Cancelled())
             !mapper.terminalEmitted ->
-                emit(ProviderEvent.Failed(true, "Provider stream ended before completion"))
+                emit(
+                    ProviderEvent.Failed(
+                        true,
+                        "Provider stream ended before completion (HTTP $status, Content-Type: ${contentType.ifBlank { "vazio" }}).",
+                    ),
+                )
         }
     }
+
+    /**
+     * Some routes answer a streaming request with plain JSON: an error object, or a complete
+     * (non-streamed) Responses/Chat result. Map those instead of failing blind.
+     */
+    private fun nonStreamingEvents(contentType: String, body: String, status: Int): List<ProviderEvent> {
+        val root = runCatching { JSONObject(body) }.getOrNull()
+            ?: return listOf(
+                ProviderEvent.Failed(
+                    retryable = false,
+                    safeMessage = "Provider did not return an SSE stream (HTTP $status, Content-Type: " +
+                        "${contentType.ifBlank { "vazio" }}, corpo: ${bodySnippet(body)}).",
+                ),
+            )
+        if (root.has("error") && !root.isNull("error")) {
+            return listOf(ProviderEvent.Failed(retryable = false, safeMessage = ProviderEventMapper(config.protocol).safeProviderError(root)))
+        }
+        val events = mutableListOf<ProviderEvent>()
+        root.optString("model").takeIf(String::isNotBlank)?.let { events += ProviderEvent.ModelResolved(it) }
+        val output = root.optJSONArray("output")
+        if (output != null) {
+            for (index in 0 until output.length()) {
+                val item = output.optJSONObject(index) ?: continue
+                when (item.optString("type")) {
+                    "message" -> {
+                        val content = item.optJSONArray("content") ?: continue
+                        for (part in 0 until content.length()) {
+                            val piece = content.optJSONObject(part) ?: continue
+                            if (piece.optString("type") == "output_text") {
+                                piece.optString("text").takeIf(String::isNotEmpty)?.let { events += ProviderEvent.TextDelta(it) }
+                            }
+                        }
+                    }
+                    "function_call" -> {
+                        val callId = item.optString("call_id").ifBlank { item.optString("id") }
+                        events += ProviderEvent.ToolCallStarted(callId, item.optString("name"))
+                        events += ProviderEvent.ToolArgumentsDelta(callId, item.optString("arguments", "{}"))
+                        events += ProviderEvent.ToolCallCompleted(callId)
+                    }
+                }
+            }
+        } else {
+            // Chat Completions shape.
+            val message = root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
+            message?.optString("content")?.takeIf(String::isNotEmpty)?.let { events += ProviderEvent.TextDelta(it) }
+        }
+        if (events.none { it is ProviderEvent.TextDelta || it is ProviderEvent.ToolCallStarted }) {
+            return listOf(ProviderEvent.Failed(false, "Provider returned JSON without output (HTTP $status, corpo: ${bodySnippet(body)})."))
+        }
+        events += ProviderEvent.Completed(root.optString("status").ifBlank { "stop" })
+        return events
+    }
+
+    /** First characters of an unexpected body, whitespace-collapsed, never long enough to leak much. */
+    private fun bodySnippet(body: String): String =
+        body.replace(SNIPPET_WHITESPACE, " ").trim().take(160).ifBlank { "vazio" }
 
     private fun buildRequestBody(request: ProviderRequest): String =
         when (config.protocol) {
             HttpProviderProtocol.OPENAI_RESPONSES -> buildResponsesBody(request)
+            HttpProviderProtocol.CHATGPT_PLAN_RESPONSES -> buildResponsesBody(request, chatgptPlan = true)
             HttpProviderProtocol.OPENAI_COMPATIBLE_CHAT -> buildChatCompletionsBody(request)
         }.toString()
 
-    private fun buildResponsesBody(request: ProviderRequest): JSONObject =
+    private fun buildResponsesBody(request: ProviderRequest, chatgptPlan: Boolean = false): JSONObject =
         JSONObject()
             .put("model", request.modelId)
             .put("stream", true)
             .put("store", false)
-            .put("input", responsesInputJson(request))
+            .put("input", responsesInputJson(request, systemRole = if (chatgptPlan) "developer" else "system"))
             .put(
                 "reasoning",
                 // Sem "summary" a Responses API trata o raciocínio como interno e nunca
@@ -199,8 +266,12 @@ class HttpModelProvider(
                 JSONObject().put("verbosity", "medium"),
             )
             .apply {
-                config.safetyIdentifier?.takeIf { it.isNotBlank() }?.let {
-                    put("safety_identifier", it)
+                // The ChatGPT-plan route rejects safety_identifier (and user/metadata), so it is
+                // only sent on the regular API.
+                if (!chatgptPlan) {
+                    config.safetyIdentifier?.takeIf { it.isNotBlank() }?.let {
+                        put("safety_identifier", it)
+                    }
                 }
                 if (request.tools.isNotEmpty()) {
                     put(
@@ -300,7 +371,7 @@ class HttpModelProvider(
             }
         }
 
-    private fun responsesInputJson(request: ProviderRequest): JSONArray =
+    private fun responsesInputJson(request: ProviderRequest, systemRole: String = "system"): JSONArray =
         JSONArray().apply {
             request.messages.forEach { message ->
                 require(message.role in SUPPORTED_ROLES) {
@@ -321,7 +392,7 @@ class HttpModelProvider(
                     if (message.parts.isNotEmpty() || message.toolCalls.isEmpty()) {
                         put(
                             JSONObject()
-                                .put("role", message.role)
+                                .put("role", if (message.role == "system") systemRole else message.role)
                                 .put("content", responsesContent(message.role, message.parts)),
                         )
                     }
@@ -554,7 +625,9 @@ internal class ProviderEventMapper(
         }
         val root = JSONObject(event.data)
         return when (protocol) {
-            HttpProviderProtocol.OPENAI_RESPONSES -> mapResponses(root)
+            HttpProviderProtocol.OPENAI_RESPONSES,
+            HttpProviderProtocol.CHATGPT_PLAN_RESPONSES,
+            -> mapResponses(root)
             HttpProviderProtocol.OPENAI_COMPATIBLE_CHAT -> mapChat(root)
         }
     }
@@ -765,9 +838,17 @@ internal class ProviderEventMapper(
         return ProviderEvent.Usage(input, output, cached)
     }
 
-    private fun safeProviderError(root: JSONObject): String {
+    internal fun safeProviderError(root: JSONObject): String {
         val error = root.optJSONObject("error")
             ?: root.optJSONObject("response")?.optJSONObject("error")
+        // ChatGPT-plan usage caps arrive as structured codes; the fix is in the user's ChatGPT
+        // settings, not a retry, so say that instead of echoing the raw code.
+        when (error?.stringOrNull("code")) {
+            "subscription_sharing_usage_limit_exceeded" ->
+                return "Limite de uso do seu plano do ChatGPT atingido para este app. Ajuste em chatgpt.com › Configurações."
+            "subscription_sharing_usage_unavailable" ->
+                return "O uso do plano do ChatGPT não está disponível para esta conta agora."
+        }
         val message = error?.stringOrNull("message")
             ?.replace(Regex("\\s+"), " ")
             ?.trim()
@@ -779,3 +860,5 @@ internal class ProviderEventMapper(
 
 private fun JSONObject.stringOrNull(name: String): String? =
     if (!has(name) || isNull(name)) null else optString(name)
+
+private val SNIPPET_WHITESPACE = Regex("""\s+""")

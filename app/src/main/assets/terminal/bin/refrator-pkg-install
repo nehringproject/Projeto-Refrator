@@ -1,0 +1,73 @@
+# pkg/apt install for the relocated Termux prefix.
+#
+# dpkg would unpack into the absolute /data/data/com.termux/files/usr path baked into every .deb,
+# which does not exist inside Refrator. So apt only resolves and downloads (signatures verified as
+# usual), and this script extracts each package into $PREFIX, records it in dpkg's status database
+# so apt knows it is installed, and points text scripts at the real prefix.
+set -euo pipefail
+
+mode=install
+if [ "${1:-}" = "--upgrade" ]; then
+  mode=upgrade
+  shift
+fi
+
+packages=()
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes|-q|--quiet|--no-install-recommends) ;;
+    -*) echo "refrator-pkg-install: opção ignorada: $arg" >&2 ;;
+    *) packages+=("$arg") ;;
+  esac
+done
+if [ "$mode" = install ] && [ "${#packages[@]}" -eq 0 ]; then
+  echo "uso: pkg install <pacote...>" >&2
+  exit 2
+fi
+
+old_prefix=/data/data/com.termux/files/usr
+work="${TMPDIR:-$PREFIX/tmp}/refrator-pkg"
+status="$PREFIX/var/lib/dpkg/status"
+rm -rf "$work"
+mkdir -p "$work/debs/partial" "$work/stage"
+trap 'rm -rf "$work"' EXIT
+
+if [ "$mode" = upgrade ]; then
+  echo "Procurando atualizações…"
+  apt-get -y -o Dir::Cache::archives="$work/debs" --download-only dist-upgrade
+  packages=("todas as atualizações")
+else
+  echo "Resolvendo dependências de: ${packages[*]}"
+  apt-get -y -o Dir::Cache::archives="$work/debs" install --download-only "${packages[@]}"
+fi
+
+shopt -s nullglob
+debs=("$work"/debs/*.deb)
+if [ "${#debs[@]}" -eq 0 ]; then
+  echo "Nada novo para instalar."
+  exit 0
+fi
+
+for deb in "${debs[@]}"; do
+  name=$(dpkg-deb -f "$deb" Package)
+  printf 'Instalando %s %s\n' "$name" "$(dpkg-deb -f "$deb" Version)"
+  dpkg-deb -x "$deb" "$work/stage"
+  # Replace any previous stanza for this package, then append the new one as installed.
+  awk -v want="Package: $name" 'BEGIN { RS = ""; ORS = "\n\n" }
+    { keep = 1; n = split($0, lines, "\n"); for (i = 1; i <= n; i++) if (lines[i] == want) keep = 0; if (keep) print }' \
+    "$status" > "$status.new"
+  { dpkg-deb -f "$deb"; echo "Status: install ok installed"; echo; } >> "$status.new"
+  mv "$status.new" "$status"
+done
+
+source_root="$work/stage$old_prefix"
+[ -d "$source_root" ] || source_root="$work/stage/usr"
+if [ -d "$source_root" ]; then
+  # Unlink instead of overwrite: upgrades may replace bash/apt while they are running.
+  cp -a --remove-destination "$source_root/." "$PREFIX/"
+fi
+
+grep -rlIZ -- "$old_prefix" "$PREFIX/bin" "$PREFIX/libexec" 2>/dev/null \
+  | xargs -0 -r sed -i "s|$old_prefix|$PREFIX|g" 2>/dev/null || true
+hash -r 2>/dev/null || true
+echo "✓ Instalado: ${packages[*]}"

@@ -47,7 +47,11 @@ class ProviderPresetTest {
         )
 
         ProviderPreset.entries
-            .filterNot { it in localPresets || it.protocol == HttpProviderProtocol.OPENAI_RESPONSES }
+            .filterNot {
+                it in localPresets ||
+                    it.protocol == HttpProviderProtocol.OPENAI_RESPONSES ||
+                    it.protocol == HttpProviderProtocol.CHATGPT_PLAN_RESPONSES
+            }
             .forEach { preset ->
                 val endpoint = URI(preset.defaultEndpoint)
                 assertEquals("https", endpoint.scheme, preset.displayName)

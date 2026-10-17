@@ -31,10 +31,18 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- "Voltar ao Refrator" from browser sign-in pages (ChatGPT plan login). Carries no data. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="refrator" android:host="return" />
             </intent-filter>
         </activity>
 
@@ -96,7 +104,7 @@
 
         <service
             android:name=".AgentAccessibilityService"
-            android:enabled="true"
+            android:enabled="false"
             android:exported="true"
             android:label="Refrator"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
@@ -110,7 +118,7 @@
 
         <service
             android:name=".AgentNotificationListenerService"
-            android:enabled="true"
+            android:enabled="false"
             android:exported="true"
             android:label="Refrator"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">

@@ -1,6 +1,33 @@
 package dev.agentworkbench
 
 import android.app.Activity
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.text.ExperimentalTextApi
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.fillMaxHeight
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.ui.text.style.TextAlign
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -278,6 +305,7 @@ fun ChatPanel(
     // Tokens ocupados na janela do modelo: estimativa local antes do envio, trocada pelo
     // valor real assim que o provider reporta Usage.
     var contextUsage by remember(sessionId) { mutableStateOf<ContextUsage?>(null) }
+    var workspaceCounts by remember { mutableStateOf(0 to 0) }
     val contextWindowTokens = remember(settings) { repository.effectiveContextWindowTokens(settings) }
     fun handleAttachment(uri: Uri?) {
         if (uri == null) return
@@ -1211,6 +1239,20 @@ fun ChatPanel(
         }
     }
 
+    LaunchedEffect(workspaceRoot, chatState.messages.size, toolActivities.size) {
+        workspaceCounts = withContext(Dispatchers.IO) { workspaceContext(workspaceRoot) }
+    }
+    val contextSummary = ContextSummary(
+        workspaceName = workspaceRoot.name,
+        workspaceFiles = workspaceCounts.first,
+        terminals = EmbeddedTerminalSessions.sessions.size,
+        documents = workspaceCounts.second + attachments.size,
+        extras = activeSkills.size,
+    )
+    // What the agent is concretely doing, for the animated thinking phrase.
+    val thinkingHint = toolActivities.lastOrNull { it.status == ToolActivityStatus.RUNNING }
+        ?.let(::toolActivityHeadline)
+        ?: concreteStatus(providerStatus)
     val agentBusy = chatState.isStreaming ||
         persistentDispatching ||
         persistentRunState.isExecuting() ||
@@ -1236,11 +1278,9 @@ fun ChatPanel(
             // Nenhum inset aqui: quem encolhe pro teclado é o Scaffold inteiro, no MainActivity.
             ,
     ) {
-        ConversationContextBar(
-            provider = visibleProvider,
-            model = visibleModel,
-            status = providerStatus,
-            active = agentBusy,
+        ContextStrip(
+            summary = contextSummary,
+            status = providerStatus.takeIf { agentBusy },
             online = online,
             onClick = onOpenSettings,
         )
@@ -1282,6 +1322,7 @@ fun ChatPanel(
                                 }?.id
                             ChatMessageBubble(
                                 message = message,
+                                thinkingHint = thinkingHint.takeIf { message.status == ChatMessageStatus.STREAMING },
                                 onCopy = {
                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
                                         as ClipboardManager
@@ -1303,25 +1344,20 @@ fun ChatPanel(
                             )
                         }
                     }
-                    toolActivities
-                        .filter { activity -> activity.afterMessageId == message.id }
-                        .forEach { activity ->
-                            item(key = "tool-${activity.callId}") {
-                                ToolActivityRow(activity)
-                            }
+                    val steps = toolActivities.filter { activity -> activity.afterMessageId == message.id }
+                    if (steps.isNotEmpty()) {
+                        item(key = "steps-${message.id}") { ActivityChecklist(steps) }
+                        steps.mapNotNull(::generatedFile).distinctBy { it.path }.forEach { file ->
+                            item(key = "file-${message.id}-${file.path}") { GeneratedFileCard(file) }
                         }
-                }
-                toolActivities
-                    .filter { activity ->
-                        activity.afterMessageId == null ||
-                            chatState.messages.none { message ->
-                                message.id == activity.afterMessageId
-                            }
                     }
-                    .forEach { activity ->
-                        item(key = "tool-${activity.callId}") {
-                            ToolActivityRow(activity)
-                        }
+                }
+                val orphanSteps = toolActivities.filter { activity ->
+                    activity.afterMessageId == null ||
+                        chatState.messages.none { message -> message.id == activity.afterMessageId }
+                }
+                if (orphanSteps.isNotEmpty()) {
+                    item(key = "steps-orphan") { ActivityChecklist(orphanSteps) }
                 }
                 chatState.usage?.let { usage ->
                     item(key = "usage") {
@@ -1423,6 +1459,8 @@ fun ChatPanel(
                 settings.preset != ProviderPreset.LOCAL_GGUF,
             contextUsage = contextUsage,
             contextWindowTokens = contextWindowTokens,
+            contextCount = contextSummary.count,
+            onContextClick = onOpenSettings,
             compactionThresholdPercent = settings.continuousChat.compactionThresholdPercent
                 .takeIf { settings.continuousChat.enabled },
             onExecutionModeChange = { mode ->
@@ -1474,11 +1512,10 @@ private fun ConversationContextBar(
             .fillMaxWidth()
             .padding(horizontal = 18.dp, vertical = 7.dp),
         shape = RoundedCornerShape(18.dp),
-        color = WorkbenchTokens.Surface,
-        border = BorderStroke(1.dp, WorkbenchTokens.BorderSoft),
+        color = Color.Transparent,
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(9.dp),
         ) {
@@ -1617,64 +1654,62 @@ private fun EmptyChat(
     onSuggestion: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Entrada escalonada: ícone, título e sugestões aparecem um depois do outro.
+    val reveal = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { reveal.animateTo(1f, tween(durationMillis = 700, easing = FastOutSlowInEasing)) }
+    fun Modifier.stage(index: Int) = graphicsLayer {
+        val local = ((reveal.value - index * 0.15f) / 0.55f).coerceIn(0f, 1f)
+        alpha = local
+        translationY = (1f - local) * 10.dp.toPx()
+    }
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(28.dp),
+            .padding(horizontal = 24.dp, vertical = 28.dp),
         contentAlignment = Alignment.Center,
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Image(
                 painter = painterResource(R.drawable.refrator_icon_art),
                 contentDescription = "Refrator",
                 modifier = Modifier
-                    .size(52.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .border(1.dp, WorkbenchTokens.Purple, RoundedCornerShape(14.dp)),
+                    .stage(0)
+                    .size(44.dp)
+                    .clip(CircleShape),
             )
             Text(
-                text = "Nova missão",
-                style = MaterialTheme.typography.labelSmall,
-                color = WorkbenchTokens.Green,
-                fontWeight = FontWeight.Bold,
-            )
-            Text(
-                text = "O que vamos construir?",
+                text = "Como posso ajudar?",
+                modifier = Modifier.stage(1),
                 style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.SemiBold,
+                color = WorkbenchTokens.Text,
             )
             Text(
-                text = "Descreva uma tarefa. O agente pode pensar, usar ferramentas e continuar em segundo plano.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "${settings.preset.displayName} · ${settings.modelId}",
+                text = "${settings.modelId} · $toolCount ferramentas" +
+                    if (skillCount > 0) " · $skillCount skills" else "",
+                modifier = Modifier.stage(1),
                 style = MaterialTheme.typography.labelMedium,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Text(
-                text = "$toolCount ferramentas callable · $skillCount skills ativas",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.tertiary,
+                color = WorkbenchTokens.TextFaint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Row(
                 modifier = Modifier
+                    .stage(2)
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.Center,
             ) {
                 SuggestionChip(
-                    label = "Diagnosticar",
+                    label = "Diagnosticar o aparelho",
                     prompt = "Faça um diagnóstico completo deste dispositivo e me mostre os próximos passos.",
                     onSuggestion = onSuggestion,
                 )
                 SuggestionChip(
-                    label = "Criar projeto",
+                    label = "Criar um projeto",
                     prompt = "Me ajude a criar um novo projeto. Primeiro entenda o objetivo e proponha um plano.",
                     onSuggestion = onSuggestion,
                 )
@@ -1698,15 +1733,15 @@ private fun SuggestionChip(
         onClick = { onSuggestion(prompt) },
         modifier = Modifier.padding(horizontal = 4.dp),
         shape = RoundedCornerShape(50),
-        color = WorkbenchTokens.SurfaceHigh,
-        border = BorderStroke(1.dp, WorkbenchTokens.Border),
+        color = WorkbenchTokens.Surface,
+        border = BorderStroke(1.dp, WorkbenchTokens.BorderSoft),
     ) {
         Text(
             text = label,
-            modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = WorkbenchTokens.Text,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Normal,
+            color = WorkbenchTokens.TextMuted,
         )
     }
 }
@@ -1717,182 +1752,142 @@ private fun ChatMessageBubble(
     onCopy: () -> Unit,
     onEdit: ((String) -> Unit)?,
     onRegenerate: (() -> Unit)?,
+    thinkingHint: String? = null,
 ) {
     val isUser = message.role == ChatRole.USER
     var editing by remember(message.id) { mutableStateOf(false) }
     var editDraft by remember(message.id) { mutableStateOf(message.text) }
+    // Entrada suave: cada mensagem sobe alguns dp enquanto aparece, como nos apps de chat.
+    val appear = remember(message.id) { Animatable(0f) }
+    LaunchedEffect(message.id) {
+        appear.animateTo(1f, tween(durationMillis = 320, easing = FastOutSlowInEasing))
+    }
+    val streaming = message.status == ChatMessageStatus.STREAMING
     Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(11.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                alpha = appear.value
+                translationY = (1f - appear.value) * 14.dp.toPx()
+            },
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        val isTyping = !isUser && message.status == ChatMessageStatus.STREAMING
-        // Só existe transição infinita enquanto a mensagem está de fato transmitindo — senão
-        // toda bolha do histórico manteria um relógio de animação rodando à toa pra sempre.
-        val breathScale = if (isTyping) {
-            val breath = rememberInfiniteTransition(label = "avatarBreath")
-            val scale by breath.animateFloat(
-                initialValue = 1f,
-                targetValue = 1.03f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(900, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "avatarBreathScale",
-            )
-            scale
-        } else {
-            1f
-        }
-        Box(
-            modifier = Modifier
-                .size(30.dp)
-                .graphicsLayer {
-                    scaleX = breathScale
-                    scaleY = breathScale
-                }
-                .background(
-                    if (isUser) WorkbenchTokens.Coral else WorkbenchTokens.Gold,
-                    RoundedCornerShape(8.dp),
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = if (isUser) "EU" else "⌘",
-                color = if (isUser) Color.White else MaterialTheme.colorScheme.onPrimary,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-            )
-        }
+        if (!isUser) RefratorAvatar(active = streaming)
         Column(
-            modifier = Modifier
-                .weight(1f)
-                .widthIn(max = 620.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp),
+            modifier = if (isUser) Modifier.padding(start = 56.dp) else Modifier.weight(1f),
+            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = if (isUser) "Você" else (message.providerDisplayName ?: "Agente"),
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = WorkbenchTokens.TextMuted,
-                )
-                if (!isUser && message.status == ChatMessageStatus.STREAMING) {
-                    // Sem caixa alta o rótulo se confundiria com texto corrido; o chip assume
-                    // o papel de dizer "isto é estado, não frase".
-                    StatusChip(text = "Em andamento", color = WorkbenchTokens.Green)
-                }
-            }
-            if (!isUser && message.reasoning.isNotBlank()) {
-                ReasoningBlock(reasoning = message.reasoning, messageId = message.id)
-            }
-            if (message.text.isEmpty() && message.status == ChatMessageStatus.STREAMING) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    color = WorkbenchTokens.Surface,
-                    border = BorderStroke(1.dp, WorkbenchTokens.Border),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(15.dp),
-                            strokeWidth = 2.dp,
-                            color = WorkbenchTokens.Green,
-                        )
-                        Text(
-                            text = "Refinando a missão…",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                }
-            } else if (editing) {
-                OutlinedTextField(
-                    value = editDraft,
-                    onValueChange = { editDraft = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    textStyle = MaterialTheme.typography.bodyLarge,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    MessageAction("Cancelar") { editing = false }
-                    MessageAction("Salvar") {
-                        editing = false
-                        val newText = editDraft.trim()
-                        if (newText.isNotEmpty()) onEdit?.invoke(newText)
-                    }
-                }
-            } else if (!isUser && message.status == ChatMessageStatus.STREAMING) {
-                // Sem isso o TalkBack fica mudo enquanto o modelo escreve — só anuncia quando
-                // o streaming termina e o foco muda de outro jeito.
-                Box(modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
-                    MessageBody(message.text)
-                }
-            } else {
-                MessageBody(message.text)
-            }
             if (!isUser) {
-                Text(
-                    text = buildString {
-                        append(message.resolvedModelId ?: message.requestedModelId ?: "modelo pendente")
-                        append(" · ")
-                        append(messageStatusLabel(message.status))
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = WorkbenchTokens.TextFaint,
-                )
+                Row(
+                    modifier = Modifier.padding(top = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = "refrator",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = WorkbenchTokens.Text,
+                    )
+                    AnimatedVisibility(visible = streaming, enter = fadeIn(), exit = fadeOut()) {
+                        Text(
+                            text = if (message.text.isEmpty()) "analisando…" else "escrevendo…",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = WorkbenchTokens.TextMuted,
+                        )
+                    }
+                }
+                if (message.reasoning.isNotBlank()) {
+                    ReasoningBlock(reasoning = message.reasoning, messageId = message.id)
+                }
+            }
+            when {
+                !isUser && message.text.isEmpty() && streaming ->
+                    ThinkingIndicator(hint = thinkingHint, reasoning = message.reasoning)
+
+                editing -> {
+                    OutlinedTextField(
+                        value = editDraft,
+                        onValueChange = { editDraft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = MaterialTheme.typography.bodyLarge,
+                        shape = RoundedCornerShape(18.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = WorkbenchTokens.Border,
+                            unfocusedBorderColor = WorkbenchTokens.BorderSoft,
+                            cursorColor = WorkbenchTokens.Gold,
+                        ),
+                    )
+                    Row(horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                        MessageAction("Cancelar") { editing = false }
+                        MessageAction("Salvar") {
+                            editing = false
+                            val newText = editDraft.trim()
+                            if (newText.isNotEmpty()) onEdit?.invoke(newText)
+                        }
+                    }
+                }
+
+                isUser -> Column(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(WorkbenchTokens.UserBubble)
+                        .border(1.dp, WorkbenchTokens.UserBubbleBorder, RoundedCornerShape(22.dp))
+                        .padding(start = 16.dp, end = 14.dp, top = 12.dp, bottom = 8.dp),
+                    horizontalAlignment = Alignment.End,
+                ) {
+                    Box(modifier = Modifier.align(Alignment.Start)) { MessageBody(message.text) }
+                    if (message.createdAtMillis > 0) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = messageClock(message.createdAtMillis),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = WorkbenchTokens.TextMuted,
+                            )
+                            Text(text = "✓✓", style = MaterialTheme.typography.labelSmall, color = WorkbenchTokens.TextMuted)
+                        }
+                    }
+                }
+
+                streaming ->
+                    // Sem isso o TalkBack fica mudo enquanto o modelo escreve.
+                    Box(modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
+                        MessageBody(message.text)
+                    }
+
+                else -> MessageBody(message.text)
             }
             message.error?.let { error ->
-                // Ficar sem rede não é falha: a missão foi só estacionada e o Android retoma
-                // sozinho. Pintar isso de vermelho de erro assusta à toa, então esse caso
-                // ganha o tom calmo de informação.
+                // Ficar sem rede não é falha: a missão foi estacionada e o Android retoma sozinho,
+                // então esse caso ganha o tom calmo de informação em vez do vermelho de erro.
                 val waitingForNetwork = error == ConnectivityMonitor.OFFLINE_MESSAGE
                 Surface(
-                    color = if (waitingForNetwork) {
-                        WorkbenchTokens.SkySoft
-                    } else {
-                        MaterialTheme.colorScheme.errorContainer
-                    },
-                    shape = RoundedCornerShape(8.dp),
+                    color = if (waitingForNetwork) WorkbenchTokens.SkySoft else MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(12.dp),
                 ) {
-                    Column(modifier = Modifier.padding(9.dp)) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
                         Text(
                             text = error,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (waitingForNetwork) {
-                                WorkbenchTokens.Sky
-                            } else {
-                                MaterialTheme.colorScheme.error
-                            },
+                            color = if (waitingForNetwork) WorkbenchTokens.Sky else MaterialTheme.colorScheme.error,
                         )
-                        // Erro de verdade ganha uma ação de recuperação em vez de só o texto
-                        // vermelho — offline não, porque ali a retomada já é automática.
                         if (!waitingForNetwork) {
-                            onRegenerate?.let { regenerate ->
-                                MessageAction("Tentar novamente", regenerate)
-                            }
+                            onRegenerate?.let { regenerate -> MessageAction("Tentar novamente", regenerate) }
                         }
                     }
                 }
             }
-            if (message.text.isNotBlank() && !editing) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+            AnimatedVisibility(
+                visible = !streaming && message.text.isNotBlank() && !editing,
+                enter = fadeIn(tween(220)),
+                exit = fadeOut(tween(120)),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     MessageAction("Copiar", onCopy)
                     if (onEdit != null) {
                         MessageAction("Editar") {
@@ -1900,14 +1895,455 @@ private fun ChatMessageBubble(
                             editing = true
                         }
                     }
-                    onRegenerate?.let { regenerate ->
-                        MessageAction("Regenerar", regenerate)
+                    onRegenerate?.let { regenerate -> MessageAction("Regenerar", regenerate) }
+                    if (!isUser) {
+                        Text(
+                            text = message.resolvedModelId ?: message.requestedModelId ?: "",
+                            modifier = Modifier.padding(start = 6.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = WorkbenchTokens.TextFaint,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }
         }
     }
 }
+
+private fun messageClock(millis: Long): String =
+    java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(millis))
+
+/** Avatar do assistente: o hexágono do Refrator num círculo; a borda acende enquanto ele trabalha. */
+@Composable
+private fun RefratorAvatar(active: Boolean) {
+    val ring by animateColorAsState(
+        targetValue = if (active) InkTokens.Glint else WorkbenchTokens.Border,
+        animationSpec = tween(300),
+        label = "avatarRing",
+    )
+    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+        AnimatedVisibility(visible = active, enter = fadeIn(tween(600)), exit = fadeOut(tween(600))) {
+            // Drawn larger than the avatar (no clip) so the ink spills softly around it.
+            InkBlobs(modifier = Modifier.requiredSize(68.dp), intensity = 0.85f)
+        }
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(WorkbenchTokens.Surface)
+                .border(1.5.dp, ring, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_refrator_mark),
+                contentDescription = null,
+                modifier = Modifier.size(22.dp),
+                tint = WorkbenchTokens.Gold,
+            )
+        }
+    }
+}
+
+/** Etapas do agente como checklist: spinner na que roda, ✓ nas concluídas, círculo nas pendentes. */
+@Composable
+private fun ActivityChecklist(activities: List<ToolActivity>) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 52.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .border(1.dp, WorkbenchTokens.BorderSoft, RoundedCornerShape(16.dp))
+            .background(WorkbenchTokens.Surface)
+            .animateContentSize(),
+    ) {
+        activities.forEachIndexed { index, activity ->
+            if (index > 0) HorizontalDivider(color = WorkbenchTokens.BorderSoft, modifier = Modifier.padding(start = 52.dp))
+            ChecklistRow(activity)
+        }
+    }
+}
+
+@Composable
+private fun ChecklistRow(activity: ToolActivity) {
+    var expanded by rememberSaveable(activity.callId) { mutableStateOf(false) }
+    val hasDetails = !activity.resultPreview.isNullOrBlank()
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = hasDetails) { expanded = !expanded }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Box(modifier = Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                when (activity.status) {
+                    ToolActivityStatus.RUNNING -> CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.5.dp,
+                        color = WorkbenchTokens.Gold,
+                        trackColor = WorkbenchTokens.SurfaceHigh,
+                    )
+                    ToolActivityStatus.COMPLETE -> Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .background(WorkbenchTokens.SurfaceHigh, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("✓", style = MaterialTheme.typography.labelMedium, color = WorkbenchTokens.Text)
+                    }
+                    ToolActivityStatus.FAILED, ToolActivityStatus.DENIED -> Text(
+                        text = "×",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = WorkbenchTokens.Red,
+                    )
+                    ToolActivityStatus.AWAITING_APPROVAL, ToolActivityStatus.AWAITING_INPUT -> Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .border(2.dp, WorkbenchTokens.TextMuted, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("!", style = MaterialTheme.typography.labelSmall, color = WorkbenchTokens.Text)
+                    }
+                }
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = toolActivityHeadline(activity),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (activity.status == ToolActivityStatus.COMPLETE) WorkbenchTokens.TextMuted else WorkbenchTokens.Text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (activity.summary.isNotBlank()) {
+                    Text(
+                        text = activity.summary,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = WorkbenchTokens.TextFaint,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            if (hasDetails) {
+                val turn by animateFloatAsState(if (expanded) 90f else 0f, label = "chevronTurn")
+                Icon(
+                    painter = painterResource(R.drawable.ic_chevron_right),
+                    contentDescription = if (expanded) "Recolher" else "Detalhes",
+                    modifier = Modifier
+                        .size(18.dp)
+                        .graphicsLayer { rotationZ = turn },
+                    tint = WorkbenchTokens.TextMuted,
+                )
+            }
+        }
+        AnimatedVisibility(visible = expanded && hasDetails) {
+            Text(
+                text = activity.resultPreview.orEmpty(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 52.dp, end = 14.dp, bottom = 12.dp)
+                    .background(WorkbenchTokens.Canvas, RoundedCornerShape(10.dp))
+                    .padding(10.dp),
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = WorkbenchTokens.TextMuted,
+                maxLines = 12,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+internal data class GeneratedFile(val path: String, val characters: Int)
+
+/** Arquivos criados/substituídos pelo agente, lidos do resumo do workspace_write. */
+internal fun generatedFile(activity: ToolActivity): GeneratedFile? {
+    if (activity.toolName != "workspace_write" || activity.status != ToolActivityStatus.COMPLETE) return null
+    val match = GENERATED_FILE_SUMMARY.matchEntire(activity.summary.trim()) ?: return null
+    return GeneratedFile(match.groupValues[2], match.groupValues[3].toIntOrNull() ?: 0)
+}
+
+private val GENERATED_FILE_SUMMARY = Regex("""^(Criar|Substituir) (.+) \((\d+) caracteres\)\.$""")
+
+@Composable
+private fun GeneratedFileCard(file: GeneratedFile) {
+    var expanded by rememberSaveable(file.path) { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .padding(start = 52.dp)
+            .widthIn(max = 420.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .border(1.dp, WorkbenchTokens.BorderSoft, RoundedCornerShape(16.dp))
+            .background(WorkbenchTokens.Surface)
+            .clickable { expanded = !expanded }
+            .padding(14.dp)
+            .animateContentSize(),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Icon(
+                painter = painterResource(R.drawable.ic_doc),
+                contentDescription = null,
+                modifier = Modifier.size(30.dp),
+                tint = WorkbenchTokens.Gold,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = file.path.substringAfterLast('/'),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = WorkbenchTokens.Text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "${humanSize(file.characters.toLong())} · Gerado agora",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = WorkbenchTokens.TextMuted,
+                )
+            }
+            Icon(
+                painter = painterResource(R.drawable.ic_chevron_right),
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = WorkbenchTokens.TextMuted,
+            )
+        }
+        if (expanded) {
+            Text(
+                text = "workspace/${file.path}",
+                modifier = Modifier.padding(top = 10.dp),
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = WorkbenchTokens.TextMuted,
+            )
+        }
+    }
+}
+
+private fun humanSize(bytes: Long): String = when {
+    bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1_024 -> "${bytes / 1_024} KB"
+    else -> "$bytes B"
+}
+
+internal data class ContextSummary(
+    val workspaceName: String,
+    val workspaceFiles: Int,
+    val terminals: Int,
+    val documents: Int,
+    val extras: Int,
+) {
+    val count: Int
+        get() = 1 + (if (terminals > 0) 1 else 0) + (if (documents > 0) 1 else 0) + extras
+}
+
+/** O que o agente enxerga nesta conversa: workspace, terminais, documentos e skills. */
+@Composable
+private fun ContextStrip(
+    summary: ContextSummary,
+    status: String?,
+    online: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .border(1.dp, WorkbenchTokens.BorderSoft, RoundedCornerShape(18.dp))
+            .background(WorkbenchTokens.Surface)
+            .clickable(onClick = onClick)
+            .padding(12.dp)
+            .animateContentSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier
+                    .background(WorkbenchTokens.SurfaceHigh, RoundedCornerShape(50))
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text("Contexto (${summary.count})", style = MaterialTheme.typography.labelLarge, color = WorkbenchTokens.Text)
+                Text("›", style = MaterialTheme.typography.labelLarge, color = WorkbenchTokens.TextMuted)
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            val note = when {
+                !online -> "sem conexão"
+                else -> status
+            }
+            AnimatedVisibility(visible = note != null, enter = fadeIn(), exit = fadeOut()) {
+                Text(
+                    text = note.orEmpty(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (!online) WorkbenchTokens.Red else WorkbenchTokens.TextMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 180.dp),
+                )
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            ContextItem(R.drawable.ic_folder, summary.workspaceName, pluralCount(summary.workspaceFiles, "arquivo", "arquivos"))
+            ContextItem(R.drawable.ic_code, "terminal", pluralCount(summary.terminals, "processo", "processos"))
+            ContextItem(R.drawable.ic_doc, "docs", pluralCount(summary.documents, "arquivo", "arquivos"))
+            if (summary.extras > 0) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .background(WorkbenchTokens.SurfaceHigh, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("+${summary.extras}", style = MaterialTheme.typography.labelLarge, color = WorkbenchTokens.Text)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContextItem(icon: Int, title: String, subtitle: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .background(WorkbenchTokens.SurfaceHigh, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(painter = painterResource(icon), contentDescription = null, modifier = Modifier.size(19.dp), tint = WorkbenchTokens.Text)
+        }
+        Column {
+            Text(title, style = MaterialTheme.typography.bodyMedium, color = WorkbenchTokens.Text, maxLines = 1)
+            Text(subtitle, style = MaterialTheme.typography.labelMedium, color = WorkbenchTokens.TextMuted, maxLines = 1)
+        }
+    }
+}
+
+private fun pluralCount(count: Int, one: String, many: String) = "$count ${if (count == 1) one else many}"
+
+/** Conta arquivos do workspace (sem pastas ocultas) e os documentos anexados, com teto. */
+internal fun workspaceContext(root: File): Pair<Int, Int> {
+    if (!root.isDirectory) return 0 to 0
+    var files = 0
+    root.walkTopDown()
+        .onEnter { it == root || !it.name.startsWith(".") }
+        .filter { it.isFile }
+        .take(WORKSPACE_COUNT_LIMIT)
+        .forEach { _ -> files++ }
+    val documents = File(root, "attachments").listFiles()?.count { it.isFile } ?: 0
+    return files to documents
+}
+
+private const val WORKSPACE_COUNT_LIMIT = 9_999
+
+/**
+ * Orbe de tinta líquida + frase do que o modelo está fazendo agora. A frase vem, em ordem, da
+ * ferramenta em execução, do raciocínio transmitido pelo modelo ou de uma rotação genérica.
+ */
+@OptIn(ExperimentalTextApi::class)
+@Composable
+private fun ThinkingIndicator(hint: String?, reasoning: String) {
+    val reasoningLine = remember(reasoning) { lastReasoningLine(reasoning) }
+    var tick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(THINKING_ROTATION_MS)
+            tick++
+        }
+    }
+    val phrase = (hint ?: reasoningLine ?: THINKING_PHRASES[tick % THINKING_PHRASES.size])
+        .trim()
+        .trimEnd('…', '.', ':')
+    val shimmer = rememberInfiniteTransition(label = "thinkingShimmer")
+    val sweep by shimmer.animateFloat(
+        initialValue = -1f,
+        targetValue = 2f,
+        animationSpec = infiniteRepeatable(tween(1_900, easing = LinearEasing)),
+        label = "thinkingSweep",
+    )
+    Row(
+        modifier = Modifier
+            .padding(vertical = 8.dp)
+            .semantics {
+                contentDescription = phrase
+                liveRegion = LiveRegionMode.Polite
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(30.dp)
+                .clip(CircleShape)
+                .background(WorkbenchTokens.Surface),
+        ) {
+            InkBlobs(modifier = Modifier.matchParentSize(), periodMillis = 3_800)
+        }
+        AnimatedContent(
+            targetState = phrase,
+            transitionSpec = {
+                (fadeIn(tween(320)) + slideInVertically(tween(320)) { it / 2 }) togetherWith
+                    (fadeOut(tween(200)) + slideOutVertically(tween(200)) { -it / 2 })
+            },
+            label = "thinkingPhrase",
+        ) { text ->
+            Text(
+                text = "$text…",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    // A highlight sweeps across the phrase, like light catching wet ink.
+                    brush = Brush.linearGradient(
+                        colors = listOf(WorkbenchTokens.TextFaint, WorkbenchTokens.Text, WorkbenchTokens.TextFaint),
+                        start = Offset(sweep * 420f, 0f),
+                        end = Offset(sweep * 420f + 260f, 0f),
+                    ),
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** Última frase legível do raciocínio transmitido, sem marcação, para virar a frase animada. */
+private fun lastReasoningLine(reasoning: String): String? {
+    if (reasoning.isBlank()) return null
+    val line = reasoning
+        .lines()
+        .map { it.trim().trimStart('#', '*', '-', '>', ' ').replace("**", "") }
+        .lastOrNull { it.length >= MIN_REASONING_PHRASE }
+        ?: return null
+    val sentence = line.split(". ").lastOrNull { it.length >= MIN_REASONING_PHRASE } ?: line
+    return if (sentence.length > MAX_REASONING_PHRASE) "…" + sentence.takeLast(MAX_REASONING_PHRASE) else sentence
+}
+
+private val THINKING_PHRASES = listOf(
+    "Lendo o contexto",
+    "Entendendo o pedido",
+    "Pensando na abordagem",
+    "Conectando as ideias",
+    "Checando os detalhes",
+    "Organizando a resposta",
+)
+private const val THINKING_ROTATION_MS = 2_600L
+private const val MIN_REASONING_PHRASE = 12
+private const val MAX_REASONING_PHRASE = 70
+
+/** Status do provider que dizem algo concreto (ferramenta, compactação); o resto é genérico. */
+private fun concreteStatus(status: String): String? =
+    status.takeIf { value ->
+        listOf("solicitou", "ferramenta", "Compact", "Montou", "Reconect").any { value.contains(it, ignoreCase = true) }
+    }
+
 
 /** Rótulo de estado num contêiner arredondado — substitui o que a caixa alta sinalizava antes. */
 @Composable
@@ -2495,6 +2931,8 @@ private fun Composer(
     contextUsage: ContextUsage?,
     contextWindowTokens: Int,
     compactionThresholdPercent: Int?,
+    contextCount: Int,
+    onContextClick: () -> Unit,
     onExecutionModeChange: (ExecutionMode) -> Unit,
     onReasoningEffortChange: (ReasoningEffort) -> Unit,
     onRemoveAttachment: (PendingAttachment) -> Unit,
@@ -2507,184 +2945,416 @@ private fun Composer(
 ) {
     val interactionsLocked = !sessionReady || isStreaming || pendingInteraction || attachBusy
     val sendEnabled = (prompt.isNotBlank() || attachments.isNotEmpty()) && !interactionsLocked
+    val composerEdge = if (isStreaming) {
+        val breath = rememberInfiniteTransition(label = "composerInk")
+        val glow by breath.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(1_400, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+            label = "composerInkGlow",
+        )
+        lerp(WorkbenchTokens.Border, InkTokens.Glint, glow)
+    } else {
+        WorkbenchTokens.Border
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(WorkbenchTokens.Canvas)
-            // Filete especular fino no topo: o composer lê como uma superfície de vidro
-            // separada do restante da tela, sem virar uma barra opaca colada embaixo.
-            .drawBehind {
-                drawRect(
-                    brush = Brush.verticalGradient(
-                        listOf(Color.White.copy(alpha = 0.06f), Color.Transparent),
-                        endY = 40f,
-                    ),
-                )
-            }
             // Nenhum inset aqui: quem trata teclado e barra de navegação é a área de conteúdo
             // inteira, no MainActivity. Ter inset nos dois lugares era a contagem dupla.
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (attachments.isNotEmpty()) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
+            shape = RoundedCornerShape(28.dp),
+            color = WorkbenchTokens.Surface,
+            border = BorderStroke(1.dp, composerEdge),
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)) {
+                if (attachments.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(start = 54.dp, bottom = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        attachments.forEach { attachment ->
+                            // Leve overshoot ao entrar: confirma visualmente "anexado".
+                            val entrance = remember(attachment.relativePath) { Animatable(0.7f) }
+                            LaunchedEffect(attachment.relativePath) {
+                                entrance.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .graphicsLayer {
+                                        scaleX = entrance.value
+                                        scaleY = entrance.value
+                                    }
+                                    .background(WorkbenchTokens.SurfaceHigh, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Icon(
+                                    painter = painterResource(if (attachment.isImage) R.drawable.ic_folder else R.drawable.ic_doc),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = WorkbenchTokens.TextMuted,
+                                )
+                                Text(
+                                    text = attachment.displayName,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = WorkbenchTokens.Text,
+                                    maxLines = 1,
+                                    modifier = Modifier.widthIn(max = 120.dp),
+                                )
+                                Text(
+                                    text = "×",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = WorkbenchTokens.TextMuted,
+                                    modifier = Modifier
+                                        .clickable { onRemoveAttachment(attachment) }
+                                        .semantics { contentDescription = "Remover ${attachment.displayName}" },
+                                )
+                            }
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box {
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(CircleShape)
+                                .background(WorkbenchTokens.SurfaceHigh)
+                                .clickable(enabled = !interactionsLocked) { onAttachMenuChange(true) }
+                                .semantics { contentDescription = "Anexar arquivo ou foto" },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "+",
+                                color = if (interactionsLocked) WorkbenchTokens.TextFaint else WorkbenchTokens.Text,
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Light,
+                            )
+                        }
+                        DropdownMenu(expanded = attachMenuOpen, onDismissRequest = { onAttachMenuChange(false) }) {
+                            DropdownMenuItem(text = { Text("Anexar arquivo") }, onClick = onAttachFile)
+                            DropdownMenuItem(text = { Text("Anexar foto") }, onClick = onAttachPhoto)
+                        }
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            modifier = Modifier
+                                .padding(start = 4.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(WorkbenchTokens.SurfaceHigh)
+                                .clickable(onClick = onContextClick)
+                                .padding(horizontal = 12.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        ) {
+                            // One of the few red details: the "live context" dot.
+                            Box(modifier = Modifier.size(8.dp).background(WorkbenchTokens.Gold, CircleShape))
+                            Text("Contexto ($contextCount)", style = MaterialTheme.typography.labelLarge, color = WorkbenchTokens.Text)
+                            Text("›", style = MaterialTheme.typography.labelLarge, color = WorkbenchTokens.TextMuted)
+                        }
+                        TextField(
+                            value = prompt,
+                            onValueChange = onPromptChange,
+                            enabled = !interactionsLocked,
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = {
+                                Text(
+                                    if (isStreaming) "Aguardando o agente…" else "Digite sua mensagem…",
+                                    color = WorkbenchTokens.TextFaint,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                            },
+                            textStyle = MaterialTheme.typography.bodyLarge,
+                            minLines = 1,
+                            maxLines = 8,
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent,
+                                disabledContainerColor = Color.Transparent,
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent,
+                                disabledIndicatorColor = Color.Transparent,
+                                cursorColor = WorkbenchTokens.Text,
+                                focusedTextColor = WorkbenchTokens.Text,
+                                unfocusedTextColor = WorkbenchTokens.Text,
+                                disabledTextColor = WorkbenchTokens.TextMuted,
+                            ),
+                        )
+                    }
+                    ComposerTuneButton(
+                        // Trocar modo ou raciocínio no meio de um turno recriaria o toolbox em uso.
+                        enabled = !isStreaming,
+                        executionMode = executionMode,
+                        reasoningEffort = reasoningEffort,
+                        reasoningSupported = reasoningSupported,
+                        onExecutionModeChange = onExecutionModeChange,
+                        onReasoningEffortChange = onReasoningEffortChange,
+                    )
+                    SendButton(
+                        isStreaming = isStreaming,
+                        sendEnabled = sendEnabled,
+                        onClick = { if (isStreaming) onStop() else onSend() },
+                    )
+                }
+            }
+        }
+        val notice = when {
+            attachError != null -> attachError to MaterialTheme.colorScheme.error
+            attachBusy -> "Anexando…" to WorkbenchTokens.TextFaint
+            pendingInteraction -> "Conclua a interação do agente antes de continuar." to MaterialTheme.colorScheme.error
+            else -> null
+        }
+        AnimatedVisibility(
+            visible = notice != null,
+            enter = fadeIn(tween(180)) + expandVertically(),
+            exit = fadeOut(tween(120)) + shrinkVertically(),
+        ) {
+            notice?.let { (text, color) ->
+                Text(
+                    text = text,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = color,
+                )
+            }
+        }
+        ContextUsageFooter(
+            usage = contextUsage,
+            windowTokens = contextWindowTokens,
+            compactionThresholdPercent = compactionThresholdPercent,
+        )
+    }
+}
+
+/** Ajustes da conversa: modo de permissões e nível de raciocínio, num único menu. */
+@Composable
+private fun ComposerTuneButton(
+    enabled: Boolean,
+    executionMode: ExecutionMode,
+    reasoningEffort: ReasoningEffort,
+    reasoningSupported: Boolean,
+    onExecutionModeChange: (ExecutionMode) -> Unit,
+    onReasoningEffortChange: (ReasoningEffort) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .clickable(enabled = enabled) { open = true }
+                .semantics { contentDescription = "Ajustes: permissões e raciocínio" },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_tune),
+                contentDescription = null,
+                modifier = Modifier.size(22.dp),
+                tint = if (enabled) WorkbenchTokens.Text else WorkbenchTokens.TextFaint,
+            )
+            // Bypassing permissions is worth a constant, tiny reminder.
+            if (executionMode == ExecutionMode.FULL) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 6.dp, end = 6.dp)
+                        .size(7.dp)
+                        .background(WorkbenchTokens.Gold, CircleShape),
+                )
+            }
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            Text(
+                text = "Permissões",
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = WorkbenchTokens.TextFaint,
+            )
+            composerModes.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(
+                                text = (if (option.mode == executionMode) "✓ " else "") + option.label,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(option.description, style = MaterialTheme.typography.labelSmall, color = WorkbenchTokens.TextMuted)
+                        }
+                    },
+                    onClick = {
+                        open = false
+                        if (option.mode != executionMode) onExecutionModeChange(option.mode)
+                    },
+                )
+            }
+            if (reasoningSupported) {
+                HorizontalDivider(color = WorkbenchTokens.BorderSoft)
+                Text(
+                    text = "Raciocínio",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = WorkbenchTokens.TextFaint,
+                )
+                ReasoningEffort.entries.forEach { effort ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = (if (effort == reasoningEffort) "✓ " else "") + effort.label,
+                                fontWeight = if (effort == reasoningEffort) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                        },
+                        onClick = {
+                            open = false
+                            if (effort != reasoningEffort) onReasoningEffortChange(effort)
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Círculo claro com avião de papel (enviar) que vira quadrado (parar) durante a geração. */
+@Composable
+private fun SendButton(
+    isStreaming: Boolean,
+    sendEnabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val active = isStreaming || sendEnabled
+    val background by animateColorAsState(
+        targetValue = if (active) WorkbenchTokens.Text else WorkbenchTokens.SurfaceHigh,
+        animationSpec = tween(180),
+        label = "sendBackground",
+    )
+    val scale by animateFloatAsState(
+        targetValue = if (active) 1f else 0.92f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+        label = "sendScale",
+    )
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clip(CircleShape)
+            .background(background)
+            .clickable(enabled = active, onClick = onClick)
+            .semantics { contentDescription = if (isStreaming) "Parar geração" else "Enviar mensagem" },
+        contentAlignment = Alignment.Center,
+    ) {
+        AnimatedContent(
+            targetState = isStreaming,
+            transitionSpec = {
+                (fadeIn(tween(160)) + scaleIn(tween(160), initialScale = 0.6f)) togetherWith
+                    (fadeOut(tween(100)) + scaleOut(tween(100), targetScale = 0.6f))
+            },
+            label = "sendIcon",
+        ) { streaming ->
+            if (streaming) {
+                Box(modifier = Modifier.size(13.dp).background(WorkbenchTokens.Canvas, RoundedCornerShape(3.dp)))
+            } else {
+                Icon(
+                    painter = painterResource(R.drawable.ic_send),
+                    contentDescription = null,
+                    modifier = Modifier.size(22.dp),
+                    tint = if (active) WorkbenchTokens.Canvas else WorkbenchTokens.TextFaint,
+                )
+            }
+        }
+    }
+}
+
+/** Rodapé: quanto da janela de contexto do modelo esta conversa já ocupa. */
+@Composable
+private fun ContextUsageFooter(
+    usage: ContextUsage?,
+    windowTokens: Int,
+    compactionThresholdPercent: Int?,
+) {
+    var details by remember { mutableStateOf(false) }
+    val fraction = usage?.let { (it.tokens.toFloat() / windowTokens.coerceAtLeast(1)).coerceIn(0f, 1f) } ?: 0f
+    val animated by animateFloatAsState(fraction, animationSpec = tween(600, easing = FastOutSlowInEasing), label = "contextFill")
+    Box {
+        Column {
+            HorizontalDivider(color = WorkbenchTokens.BorderSoft)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { details = true }
+                    .padding(horizontal = 6.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                attachments.forEach { attachment ->
-                    // Leve overshoot ao entrar: confirma visualmente "anexado" no instante em
-                    // que o chip aparece, em vez de simplesmente surgir estático.
-                    val entrance = remember(attachment.relativePath) { Animatable(0.7f) }
-                    LaunchedEffect(attachment.relativePath) {
-                        entrance.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
-                    }
-                    Row(
-                        modifier = Modifier
-                            .graphicsLayer {
-                                scaleX = entrance.value
-                                scaleY = entrance.value
-                            }
-                            .background(WorkbenchTokens.SurfaceHigh, RoundedCornerShape(14.dp))
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Text(
-                            text = if (attachment.isImage) "🖼" else "📄",
-                            style = MaterialTheme.typography.labelLarge,
-                        )
-                        Text(
-                            text = attachment.displayName,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = WorkbenchTokens.Text,
-                            maxLines = 1,
-                            modifier = Modifier.widthIn(max = 120.dp),
-                        )
-                        Text(
-                            text = "×",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = WorkbenchTokens.TextMuted,
-                            modifier = Modifier
-                                .clickable { onRemoveAttachment(attachment) }
-                                .semantics { contentDescription = "Remover ${attachment.displayName}" },
-                        )
-                    }
-                }
-            }
-        }
-        Row(
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Box {
-                IconButton(
-                    enabled = !interactionsLocked,
-                    onClick = { onAttachMenuChange(true) },
+                Box(
                     modifier = Modifier
-                        .size(48.dp)
-                        .background(WorkbenchTokens.SurfaceHigh, CircleShape)
-                        .semantics { contentDescription = "Anexar arquivo ou foto" },
+                        .width(110.dp)
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(WorkbenchTokens.SurfaceHigh),
                 ) {
-                    Text(
-                        text = "+",
-                        color = if (interactionsLocked) WorkbenchTokens.TextFaint else WorkbenchTokens.Text,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(animated)
+                            .background(if (fraction >= 0.85f) WorkbenchTokens.Red else WorkbenchTokens.Gold),
                     )
                 }
-                DropdownMenu(
-                    expanded = attachMenuOpen,
-                    onDismissRequest = { onAttachMenuChange(false) },
-                ) {
-                    DropdownMenuItem(text = { Text("Anexar arquivo") }, onClick = onAttachFile)
-                    DropdownMenuItem(text = { Text("Anexar foto") }, onClick = onAttachPhoto)
-                }
-            }
-            OutlinedTextField(
-                value = prompt,
-                onValueChange = onPromptChange,
-                enabled = !interactionsLocked,
-                modifier = Modifier.weight(1f),
-                placeholder = {
-                    Text(
-                        "Descreva sua próxima missão…",
-                        color = WorkbenchTokens.TextFaint,
-                    )
-                },
-                minLines = 1,
-                maxLines = 6,
-                shape = RoundedCornerShape(26.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = WorkbenchTokens.Surface,
-                    unfocusedContainerColor = WorkbenchTokens.Surface,
-                    disabledContainerColor = WorkbenchTokens.Surface,
-                    focusedBorderColor = WorkbenchTokens.Gold,
-                    unfocusedBorderColor = WorkbenchTokens.Border,
-                    disabledBorderColor = WorkbenchTokens.BorderSoft,
-                    cursorColor = WorkbenchTokens.Gold,
-                    focusedTextColor = WorkbenchTokens.Text,
-                    unfocusedTextColor = WorkbenchTokens.Text,
-                    disabledTextColor = WorkbenchTokens.TextMuted,
-                ),
-            )
-            IconButton(
-                enabled = isStreaming || sendEnabled,
-                onClick = { if (isStreaming) onStop() else onSend() },
-                modifier = Modifier
-                    .size(48.dp)
-                    .background(
-                        when {
-                            isStreaming -> WorkbenchTokens.Red
-                            sendEnabled -> WorkbenchTokens.Gold
-                            else -> WorkbenchTokens.SurfaceHigh
-                        },
-                        CircleShape,
-                    )
-                    .semantics {
-                        contentDescription = if (isStreaming) "Parar geração" else "Enviar mensagem"
-                    },
-            ) {
+                Spacer(modifier = Modifier.weight(1f))
+                Text("Contexto usado", style = MaterialTheme.typography.labelMedium, color = WorkbenchTokens.TextMuted)
                 Text(
-                    text = if (isStreaming) "■" else "↑",
-                    color = if (isStreaming || sendEnabled) Color.White else WorkbenchTokens.TextFaint,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
+                    text = "${usage?.let { (if (it.exact) "" else "~") + compactTokens(it.tokens) } ?: "0"} / ${compactTokens(windowTokens.toLong())}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = WorkbenchTokens.Text,
+                )
+                Icon(
+                    painter = painterResource(R.drawable.ic_chevron_right),
+                    contentDescription = "Detalhes do contexto",
+                    modifier = Modifier.size(16.dp),
+                    tint = WorkbenchTokens.TextMuted,
                 )
             }
         }
-        when {
-            attachError != null -> Text(
-                text = attachError,
-                modifier = Modifier.fillMaxWidth().padding(start = 4.dp),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-            attachBusy -> Text(
-                text = "Anexando…",
-                modifier = Modifier.fillMaxWidth().padding(start = 4.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = WorkbenchTokens.TextFaint,
-            )
-            pendingInteraction -> Text(
-                text = "Conclua a interação do agente antes de continuar.",
-                modifier = Modifier.fillMaxWidth().padding(start = 4.dp),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-            else -> ComposerControls(
-                // Trocar modo ou raciocínio no meio de um turno recriaria o toolbox em uso.
-                enabled = !isStreaming,
-                executionMode = executionMode,
-                reasoningEffort = reasoningEffort,
-                reasoningSupported = reasoningSupported,
-                contextUsage = contextUsage,
-                contextWindowTokens = contextWindowTokens,
-                compactionThresholdPercent = compactionThresholdPercent,
-                onExecutionModeChange = onExecutionModeChange,
-                onReasoningEffortChange = onReasoningEffortChange,
-            )
+        DropdownMenu(expanded = details, onDismissRequest = { details = false }) {
+            Column(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text("Uso de contexto", fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = usage?.let { "%,d tokens%s".format(it.tokens, if (it.exact) "" else " (estimado)") }
+                        ?: "Nenhuma mensagem enviada ainda",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = "Janela do modelo: %,d tokens".format(windowTokens),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = WorkbenchTokens.TextMuted,
+                )
+                Text(
+                    text = compactionThresholdPercent?.let { "Compactação automática ao atingir $it%" }
+                        ?: "Compactação automática desligada (Configurações › Chat contínuo)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = WorkbenchTokens.TextMuted,
+                )
+            }
         }
     }
 }
@@ -2713,224 +3383,6 @@ private fun composerModeColor(mode: ExecutionMode): Color = when (mode) {
     ExecutionMode.AUTO -> WorkbenchTokens.Gold
     ExecutionMode.PLAN -> WorkbenchTokens.Purple
     else -> WorkbenchTokens.Green
-}
-
-@Composable
-private fun ComposerControls(
-    enabled: Boolean,
-    executionMode: ExecutionMode,
-    reasoningEffort: ReasoningEffort,
-    reasoningSupported: Boolean,
-    contextUsage: ContextUsage?,
-    contextWindowTokens: Int,
-    compactionThresholdPercent: Int?,
-    onExecutionModeChange: (ExecutionMode) -> Unit,
-    onReasoningEffortChange: (ReasoningEffort) -> Unit,
-) {
-    var modeMenuOpen by remember { mutableStateOf(false) }
-    var reasoningMenuOpen by remember { mutableStateOf(false) }
-    var contextDetailsOpen by remember { mutableStateOf(false) }
-    val modeLabel = composerModes.firstOrNull { it.mode == executionMode }?.label
-        ?: executionMode.name.lowercase()
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .weight(1f)
-                .horizontalScroll(rememberScrollState()),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Box {
-                ComposerChip(
-                    text = modeLabel,
-                    dotColor = composerModeColor(executionMode),
-                    enabled = enabled,
-                    description = "Modo de permissões: $modeLabel",
-                    onClick = { modeMenuOpen = true },
-                )
-                DropdownMenu(expanded = modeMenuOpen, onDismissRequest = { modeMenuOpen = false }) {
-                    composerModes.forEach { option ->
-                        DropdownMenuItem(
-                            text = {
-                                Column {
-                                    Text(
-                                        text = (if (option.mode == executionMode) "✓ " else "") + option.label,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = composerModeColor(option.mode),
-                                    )
-                                    Text(
-                                        text = option.description,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = WorkbenchTokens.TextMuted,
-                                    )
-                                }
-                            },
-                            onClick = {
-                                modeMenuOpen = false
-                                if (option.mode != executionMode) onExecutionModeChange(option.mode)
-                            },
-                        )
-                    }
-                }
-            }
-            if (reasoningSupported) {
-                Box {
-                    ComposerChip(
-                        text = "Raciocínio: ${reasoningEffort.label}",
-                        dotColor = null,
-                        enabled = enabled,
-                        description = "Nível de raciocínio: ${reasoningEffort.label}",
-                        onClick = { reasoningMenuOpen = true },
-                    )
-                    DropdownMenu(
-                        expanded = reasoningMenuOpen,
-                        onDismissRequest = { reasoningMenuOpen = false },
-                    ) {
-                        ReasoningEffort.entries.forEach { effort ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(
-                                            text = (if (effort == reasoningEffort) "✓ " else "") + effort.label,
-                                            fontWeight = FontWeight.SemiBold,
-                                        )
-                                        Text(
-                                            text = when (effort) {
-                                                ReasoningEffort.DEFAULT -> "O provedor decide"
-                                                ReasoningEffort.LOW -> "Respostas mais rápidas e baratas"
-                                                ReasoningEffort.MEDIUM -> "Equilíbrio entre velocidade e qualidade"
-                                                ReasoningEffort.HIGH -> "Pensa mais antes de responder"
-                                            },
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = WorkbenchTokens.TextMuted,
-                                        )
-                                    }
-                                },
-                                onClick = {
-                                    reasoningMenuOpen = false
-                                    if (effort != reasoningEffort) onReasoningEffortChange(effort)
-                                },
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        Box {
-            ContextUsageIndicator(
-                usage = contextUsage,
-                windowTokens = contextWindowTokens,
-                onClick = { contextDetailsOpen = true },
-            )
-            DropdownMenu(
-                expanded = contextDetailsOpen,
-                onDismissRequest = { contextDetailsOpen = false },
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text("Uso de contexto", fontWeight = FontWeight.SemiBold)
-                    Text(
-                        text = contextUsage?.let {
-                            "%,d tokens%s".format(it.tokens, if (it.exact) "" else " (estimado)")
-                        } ?: "Nenhuma mensagem enviada ainda",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        text = "Janela do modelo: %,d tokens".format(contextWindowTokens),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = WorkbenchTokens.TextMuted,
-                    )
-                    Text(
-                        text = compactionThresholdPercent
-                            ?.let { "Compactação automática ao atingir $it%" }
-                            ?: "Compactação automática desligada (Configurações › Chat contínuo)",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = WorkbenchTokens.TextMuted,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ComposerChip(
-    text: String,
-    dotColor: Color?,
-    enabled: Boolean,
-    description: String,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(WorkbenchTokens.SurfaceHigh)
-            .clickable(enabled = enabled, onClick = onClick)
-            .semantics { contentDescription = description }
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        if (dotColor != null) {
-            Box(modifier = Modifier.size(6.dp).background(dotColor, CircleShape))
-        }
-        Text(
-            text = "$text ▾",
-            style = MaterialTheme.typography.labelSmall,
-            color = if (enabled) WorkbenchTokens.Text else WorkbenchTokens.TextFaint,
-            maxLines = 1,
-        )
-    }
-}
-
-@Composable
-private fun ContextUsageIndicator(
-    usage: ContextUsage?,
-    windowTokens: Int,
-    onClick: () -> Unit,
-) {
-    val fraction = usage
-        ?.let { (it.tokens.toFloat() / windowTokens.coerceAtLeast(1)).coerceIn(0f, 1f) }
-        ?: 0f
-    val color = when {
-        fraction >= 0.85f -> WorkbenchTokens.Red
-        fraction >= 0.6f -> WorkbenchTokens.Gold
-        else -> WorkbenchTokens.Green
-    }
-    val percent = (fraction * 100).toInt()
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
-            .semantics { contentDescription = "Uso de contexto: $percent por cento" }
-            .padding(horizontal = 8.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Canvas(modifier = Modifier.size(14.dp)) {
-            val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
-            drawArc(WorkbenchTokens.Border, 0f, 360f, useCenter = false, style = stroke)
-            if (fraction > 0f) {
-                drawArc(color, -90f, 360f * fraction, useCenter = false, style = stroke)
-            }
-        }
-        Text(
-            text = usage?.let {
-                (if (it.exact) "" else "~") +
-                    "${compactTokens(it.tokens)}/${compactTokens(windowTokens.toLong())} · $percent%"
-            } ?: "0/${compactTokens(windowTokens.toLong())}",
-            style = MaterialTheme.typography.labelSmall,
-            fontFamily = FontFamily.Monospace,
-            color = WorkbenchTokens.TextMuted,
-            maxLines = 1,
-        )
-    }
 }
 
 private fun compactTokens(value: Long): String = when {

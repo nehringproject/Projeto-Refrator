@@ -4,11 +4,14 @@ import android.accessibilityservice.AccessibilityService
 import android.os.Build
 import android.accessibilityservice.GestureDescription
 import android.content.Context
+import android.content.ComponentName
+import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import androidx.annotation.RequiresApi
 import org.json.JSONArray
 import org.json.JSONObject
@@ -38,7 +41,7 @@ class AgentAccessibilityController(context: Context) : AccessibilityAutomationBr
     override fun status(): String = JSONObject()
         .put("service_connected", AgentAccessibilityRuntime.service != null)
         .put("app_authorized", authorization.isAuthorized(CAPABILITY))
-        .put("root_available", AgentAccessibilityRuntime.service?.rootInActiveWindow != null)
+        .put("root_available", authorization.isAuthorized(CAPABILITY) && AgentAccessibilityRuntime.service?.rootInActiveWindow != null)
         .toString(2)
 
     override fun snapshot(maxNodes: Int): String {
@@ -71,7 +74,8 @@ class AgentAccessibilityController(context: Context) : AccessibilityAutomationBr
         maxNodes: Int,
     ): String {
         val output = JSONArray()
-        val matching = service.windows.filter { it.displayId == displayId }
+        // service.windows only covers the default display; virtual displays need windowsOnAllDisplays.
+        val matching = service.windowsOnAllDisplays.get(displayId).orEmpty()
         matching.forEach { window ->
             val nodes = JSONArray()
             window.root?.let { root -> appendNode(root, "w${window.id}.n0", 0, maxNodes, nodes) }
@@ -185,13 +189,53 @@ class AgentAccessibilityController(context: Context) : AccessibilityAutomationBr
     }
 
     private fun resolve(id: String): AccessibilityNodeInfo {
-        require(id.matches(Regex("n0(?:\\.[0-9]{1,3}){0,18}"))) { "ID de nó inválido." }
-        var node = AgentAccessibilityRuntime.service?.rootInActiveWindow
-            ?: error("A janela ativa não expôs árvore de acessibilidade.")
-        id.split('.').drop(1).forEach { segment ->
+        // "n0.2.1" walks the active window; "w42.n0.2.1" (from a display snapshot) walks window 42,
+        // which may live on the parallel ShadowDisplay.
+        val match = NODE_ID.matchEntire(id) ?: error("ID de nó inválido.")
+        val windowId = match.groupValues[1].toIntOrNull()
+        val service = AgentAccessibilityRuntime.service ?: error("AccessibilityService não está conectado.")
+        var node = if (windowId == null) {
+            service.rootInActiveWindow ?: error("A janela ativa não expôs árvore de acessibilidade.")
+        } else {
+            findWindow(service, windowId)?.root ?: error("A janela $windowId não existe mais; crie novo snapshot.")
+        }
+        match.groupValues[2].split('.').drop(1).forEach { segment ->
             node = node.getChild(segment.toInt()) ?: error("O nó expirou; crie novo snapshot.")
         }
         return node
+    }
+
+    private fun findWindow(service: AccessibilityService, windowId: Int): AccessibilityWindowInfo? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val all = service.windowsOnAllDisplays
+            (0 until all.size()).asSequence().flatMap { all.valueAt(it).asSequence() }.firstOrNull { it.id == windowId }
+        } else {
+            service.windows.firstOrNull { it.id == windowId }
+        }
+
+    /**
+     * Types into the focused field of [displayId] through ACTION_SET_TEXT, so accents and emoji
+     * survive (the shell `input text` path only handles ASCII). Appends to what is already typed.
+     */
+    override fun setFocusedText(displayId: Int, text: String): String {
+        requireAuthorized()
+        val service = AgentAccessibilityRuntime.service ?: error("AccessibilityService não está conectado.")
+        require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { "Digitação por display exige Android 11 ou superior." }
+        val field = service.windowsOnAllDisplays.get(displayId).orEmpty().firstNotNullOfOrNull { window ->
+            window.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable }
+        } ?: error("Nenhum campo de texto focado na tela paralela; toque no campo antes.")
+        require(!field.isPassword) { "Campos protegidos não aceitam texto vindo do modelo." }
+        val current = if (field.isShowingHintText) "" else field.text?.toString().orEmpty()
+        val arguments = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, current + text)
+        }
+        check(field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)) { "O campo recusou o texto." }
+        return JSONObject()
+            .put("ok", true)
+            .put("display_id", displayId)
+            .put("method", "accessibility_set_text")
+            .put("chars", text.length)
+            .toString()
     }
 
     private fun safe(value: CharSequence?): String =
@@ -201,5 +245,18 @@ class AgentAccessibilityController(context: Context) : AccessibilityAutomationBr
         require(authorization.isAuthorized(CAPABILITY)) { "Accessibility não foi autorizada na Central de Capacidades." }
     }
 
-    private companion object { const val CAPABILITY = "accessibility" }
+    companion object {
+        private const val CAPABILITY = "accessibility"
+        private val NODE_ID = Regex("(?:w(\\d{1,10})\\.)?(n0(?:\\.[0-9]{1,3}){0,18})")
+
+        fun disconnect(context: Context) {
+            AgentAccessibilityRuntime.service?.disableSelf()
+            AgentAccessibilityRuntime.service = null
+            context.packageManager.setComponentEnabledSetting(
+                ComponentName(context, AgentAccessibilityService::class.java),
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                PackageManager.DONT_KILL_APP,
+            )
+        }
+    }
 }

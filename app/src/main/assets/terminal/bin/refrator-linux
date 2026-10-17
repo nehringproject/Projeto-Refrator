@@ -1,0 +1,267 @@
+# refrator-linux — a full glibc Linux (Ubuntu LTS) inside Refrator, through proot.
+#
+#   refrator-linux install      download + verify + unpack the rootfs (once)
+#   refrator-linux login        interactive shell (alias: ubuntu)
+#   refrator-linux run <cmd…>   run one command inside and return
+#   refrator-linux remove       delete the distro
+#
+# The agent workspace is mounted at /workspace and shared storage at /sdcard, so CLIs running
+# inside (Claude Code, Codex, OpenCode, Gemini…) work on the same files as the Refrator agent.
+set -euo pipefail
+
+DISTRO_NAME="Ubuntu 26.04.1 LTS"
+# Official Canonical rootfs; the checksum comes from the release's SHA256SUMS.
+ROOTFS_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-arm64.tar.gz"
+ROOTFS_SHA256="5a1906794ced63a71a8119c3f211ef5f0bbe0a243001b4bbd41fdf80c5b219fd"
+
+distros="${REFRATOR_DISTROS:-$(dirname "$HOME")/distros}"
+root="$distros/ubuntu"
+
+die() { printf '\033[38;5;203mrefrator-linux:\033[0m %s\n' "$*" >&2; exit 1; }
+note() { printf '\033[38;5;173m›\033[0m %s\n' "$*"; }
+
+require_direct_exec() {
+  # proot must execve() binaries stored in app data, which SELinux only allows below targetSdk 29.
+  if [ "${REFRATOR_TARGET_SDK:-0}" -ge 29 ]; then
+    die "o Linux completo precisa do app \"Refrator Dev\" (targetSdk 28). Esta versão protege a execução (W^X) e não permite proot."
+  fi
+}
+
+require_proot() {
+  command -v proot >/dev/null 2>&1 && return 0
+  note "Instalando proot…"
+  refrator-pkg-install proot
+  hash -r
+  command -v proot >/dev/null 2>&1 || die "não foi possível instalar o proot."
+}
+
+# The marker is written only after a complete extraction, so half-extracted trees never count.
+is_installed() { [ -f "$root/.refrator-installed" ]; }
+
+cmd_install() {
+  require_direct_exec
+  if is_installed; then note "$DISTRO_NAME já está instalado em $root"; return 0; fi
+  require_proot
+  local tmp="${TMPDIR:-$PREFIX/tmp}/refrator-linux"
+  mkdir -p "$tmp" "$distros"
+  local tarball="$tmp/rootfs.tar.gz"
+  note "Baixando $DISTRO_NAME (≈35 MB)…"
+  curl -fL --retry 3 --progress-bar -o "$tarball" "$ROOTFS_URL"
+  note "Verificando SHA-256…"
+  echo "$ROOTFS_SHA256  $tarball" | sha256sum -c --quiet - || { rm -f "$tarball"; die "checksum não confere; download descartado."; }
+  note "Extraindo…"
+  # Leftovers from an interrupted install (or the old ".partial" layout) are removed through proot
+  # so its link2symlink bookkeeping files go too.
+  [ -e "$root" ] && proot --link2symlink -0 rm -rf "$root"
+  [ -e "$root.partial" ] && proot --link2symlink -0 rm -rf "$root.partial"
+  mkdir -p "$root"
+  # Android forbids hardlinks in app storage: --link2symlink emulates them with symlinks holding
+  # absolute paths, so the tree is extracted in place and must never be moved afterwards.
+  # tar warns about ownership/devices it cannot reproduce; keep that log for real failures.
+  local log="$tmp/extract.log"
+  proot --link2symlink -0 tar -C "$root" --exclude='./dev/*' --no-same-owner -xzf "$tarball" >"$log" 2>&1 || true
+  if ! [ -e "$root/usr/bin/env" ] || ! [ -e "$root/usr/bin/bash" ]; then
+    tail -n 8 "$log" >&2
+    die "a extração falhou (log acima)."
+  fi
+  touch "$root/.refrator-installed"
+  rm -f "$tarball"
+  prepare_rootfs
+  note "Pronto. Entre com: ubuntu   (ou refrator-linux login)"
+  note "Dentro dele, rode: refrator-setup   para instalar Claude Code, Codex, OpenCode e Gemini."
+}
+
+# Files Refrator owns inside the guest; rewritten on every login so app updates reach them.
+prepare_rootfs() {
+  mkdir -p "$root/tmp" "$root/root" "$root/etc/apt/apt.conf.d" "$root/etc/refrator" "$root/usr/local/bin" "$root/workspace" "$root/sdcard"
+  chmod 1777 "$root/tmp" 2>/dev/null || true
+  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$root/etc/resolv.conf"
+  printf '127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n' > "$root/etc/hosts"
+  # proot fakes root, so apt's _apt privilege drop and some dpkg checks must be relaxed.
+  printf 'APT::Sandbox::User "root";\nDPkg::Options:: "--force-unsafe-io";\n' > "$root/etc/apt/apt.conf.d/01-refrator"
+  # Name Android's supplementary groups so tools stop printing "cannot find name for group".
+  local gid
+  for gid in $(id -G); do
+    grep -q "^[^:]*:x:$gid:" "$root/etc/group" 2>/dev/null || echo "aid_$gid:x:$gid:root" >> "$root/etc/group"
+  done
+  write_guest_tools
+}
+
+write_guest_tools() {
+  local bin="$root/usr/local/bin"
+  # Bridge client in pure bash (/dev/tcp): works before curl exists in the guest.
+  cat > "$bin/refrator-bridge" <<'GUEST'
+#!/bin/bash
+# usage: refrator-bridge <path> <json-body>  → prints the response body
+[ -f /etc/refrator/bridge.env ] && . /etc/refrator/bridge.env
+: "${REFRATOR_BRIDGE_URL:?abra o terminal pelo Refrator}"
+hostport=${REFRATOR_BRIDGE_URL#http://}
+host=${hostport%:*}
+port=${hostport##*:}
+body=$2
+# Content-Length counts bytes, so measure with the C locale.
+LC_ALL=C
+length=${#body}
+exec 3<>"/dev/tcp/$host/$port" || exit 1
+printf 'POST %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \
+  "$1" "$hostport" "$REFRATOR_BRIDGE_TOKEN" "$length" "$body" >&3
+while IFS= read -r line <&3; do line=${line%$'\r'}; [ -z "$line" ] && break; done
+cat <&3
+exec 3>&-
+GUEST
+  cat > "$bin/refrator-open" <<'GUEST'
+#!/bin/bash
+# Opens a URL in the Android browser (OAuth logins redirect back to localhost here).
+url=$1
+[ -z "$url" ] && { echo "uso: refrator-open <url>" >&2; exit 2; }
+escaped=$(printf '%s' "$url" | sed 's/\\/\\\\/g; s/"/\\"/g')
+refrator-bridge /open "{\"url\":\"$escaped\"}" | grep -q '"ok":true' || { echo "Abra manualmente: $url" >&2; exit 1; }
+GUEST
+  cat > "$bin/refrator-mcp" <<'GUEST'
+#!/bin/bash
+# MCP stdio server: each JSON-RPC line goes to the Refrator app; replies come back on stdout.
+while IFS= read -r line || [ -n "$line" ]; do
+  [ -z "$line" ] && continue
+  response=$(refrator-bridge /mcp "$line")
+  [ -n "$response" ] && printf '%s\n' "$response"
+done
+GUEST
+  cat > "$bin/refrator-setup" <<'GUEST'
+#!/bin/bash
+# Installs coding CLIs in this Ubuntu and connects each one to Refrator's tools (MCP).
+#   refrator-setup                 → base tools + claude + codex + opencode + gemini
+#   refrator-setup claude codex    → only those
+set -u
+want=("$@"); [ ${#want[@]} -eq 0 ] && want=(claude codex opencode gemini)
+has() { printf '%s\n' "${want[@]}" | grep -qx "$1"; }
+step() { printf '\n\033[38;5;173m›\033[0m %s\n' "$*"; }
+ok() { printf '  \033[38;5;114m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[38;5;203m!\033[0m %s\n' "$*"; }
+export DEBIAN_FRONTEND=noninteractive PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+
+step "Ferramentas base (git, curl, node, python, build)…"
+apt-get update -q && apt-get install -yq --no-install-recommends \
+  ca-certificates curl git openssh-client nodejs npm python3 python3-pip python3-venv \
+  build-essential ripgrep jq unzip less nano procps && ok "base instalada" || warn "falha na base"
+npm config set prefix /usr/local >/dev/null 2>&1
+
+if has claude; then
+  step "Claude Code (instalador nativo oficial)…"
+  if curl -fsSL https://claude.ai/install.sh | bash; then
+    claude mcp remove refrator -s user >/dev/null 2>&1
+    claude mcp add refrator -s user -- refrator-mcp >/dev/null && ok "claude + MCP refrator"
+  else warn "instalação do Claude Code falhou"; fi
+fi
+if has codex; then
+  step "Codex CLI…"
+  if npm install -g @openai/codex >/dev/null; then
+    mkdir -p ~/.codex
+    grep -q 'mcp_servers.refrator' ~/.codex/config.toml 2>/dev/null || \
+      printf '\n[mcp_servers.refrator]\ncommand = "refrator-mcp"\n' >> ~/.codex/config.toml
+    ok "codex + MCP refrator"
+  else warn "instalação do Codex falhou"; fi
+fi
+if has opencode; then
+  step "OpenCode…"
+  if curl -fsSL https://opencode.ai/install | bash >/dev/null; then
+    cfg=~/.config/opencode/opencode.json
+    if [ ! -f "$cfg" ]; then
+      mkdir -p "$(dirname "$cfg")"
+      printf '%s\n' '{"$schema":"https://opencode.ai/config.json","mcp":{"refrator":{"type":"local","command":["refrator-mcp"],"enabled":true}}}' > "$cfg"
+    fi
+    ok "opencode + MCP refrator"
+  else warn "instalação do OpenCode falhou"; fi
+fi
+if has gemini; then
+  step "Gemini CLI…"
+  if npm install -g @google/gemini-cli >/dev/null; then
+    cfg=~/.gemini/settings.json
+    [ -f "$cfg" ] || { mkdir -p ~/.gemini; printf '%s\n' '{"mcpServers":{"refrator":{"command":"refrator-mcp"}}}' > "$cfg"; }
+    ok "gemini + MCP refrator"
+  else warn "instalação do Gemini CLI falhou"; fi
+fi
+step "Logins abrem no navegador do Android e voltam sozinhos para o terminal."
+GUEST
+  printf '#!/bin/bash\nexec refrator-open "$@"\n' > "$bin/xdg-open"
+  cp "$bin/xdg-open" "$bin/sensible-browser"
+  chmod 755 "$bin"/refrator-bridge "$bin"/refrator-open "$bin"/refrator-mcp "$bin"/refrator-setup "$bin"/xdg-open "$bin"/sensible-browser
+  # Bridge location for clients that spawn refrator-mcp without the login environment.
+  printf "REFRATOR_BRIDGE_URL='%s'\nREFRATOR_BRIDGE_TOKEN='%s'\n" "${REFRATOR_BRIDGE_URL:-}" "${REFRATOR_BRIDGE_TOKEN:-}" > "$root/etc/refrator/bridge.env"
+  cat > "$root/etc/profile.d/refrator.sh" <<'GUEST'
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/usr/local/bin:$PATH"
+export BROWSER=refrator-open
+GUEST
+  # Ubuntu's default ~/.bashrc sets its own PS1, so ours is sourced at its very end.
+  cat > "$root/etc/refrator/prompt.sh" <<'GUEST'
+PS1='\[\e[38;5;242m\]╭─ \[\e[38;5;173m\]ubuntu \[\e[38;5;252m\]\w\[\e[0m\]\n\[\e[38;5;242m\]╰─\[\e[38;5;114m\]❯\[\e[0m\] '
+if [ -z "${REFRATOR_GUEST_STARTED:-}" ]; then
+  export REFRATOR_GUEST_STARTED=1
+  cd /workspace 2>/dev/null || true
+  printf '\033[38;5;242m%s · /workspace = código do agente · refrator-setup instala os CLIs\033[0m\n' \
+    "$(. /etc/os-release; echo "$PRETTY_NAME")"
+fi
+GUEST
+  grep -q 'refrator/prompt.sh' "$root/root/.bashrc" 2>/dev/null ||
+    echo '[ -f /etc/refrator/prompt.sh ] && . /etc/refrator/prompt.sh' >> "$root/root/.bashrc"
+}
+
+fake_proc_binds() {
+  # Android hides some /proc files from apps; programs like top/ps/node expect them.
+  local dir="$root/proc-fake" binds=()
+  mkdir -p "$dir"
+  if ! cat /proc/loadavg >/dev/null 2>&1; then echo "0.12 0.07 0.02 2/165 765" > "$dir/loadavg"; binds+=(-b "$dir/loadavg:/proc/loadavg"); fi
+  if ! cat /proc/stat >/dev/null 2>&1; then printf 'cpu  1957 0 2877 93280 262 342 254 87 0 0\nbtime 1700000000\n' > "$dir/stat"; binds+=(-b "$dir/stat:/proc/stat"); fi
+  if ! cat /proc/uptime >/dev/null 2>&1; then echo "124.08 932.80" > "$dir/uptime"; binds+=(-b "$dir/uptime:/proc/uptime"); fi
+  if ! cat /proc/vmstat >/dev/null 2>&1; then echo "nr_free_pages 136234" > "$dir/vmstat"; binds+=(-b "$dir/vmstat:/proc/vmstat"); fi
+  printf '%s\n' "${binds[@]+"${binds[@]}"}"
+}
+
+cmd_login() {
+  require_direct_exec
+  is_installed || { note "$DISTRO_NAME ainda não está instalado."; cmd_install; }
+  require_proot
+  prepare_rootfs
+  local args=(
+    --kill-on-exit --link2symlink --root-id --sysvipc
+    --rootfs="$root" --cwd=/root
+    -b /dev -b /dev/urandom:/dev/random -b /proc -b /sys
+    -b /proc/self/fd:/dev/fd -b /proc/self/fd/0:/dev/stdin -b /proc/self/fd/1:/dev/stdout -b /proc/self/fd/2:/dev/stderr
+    -b "$root/tmp:/dev/shm"
+  )
+  local path
+  for path in /system /apex /vendor /linkerconfig/ld.config.txt; do [ -e "$path" ] && args+=(-b "$path"); done
+  [ -n "${REFRATOR_WORKSPACE:-}" ] && [ -d "$REFRATOR_WORKSPACE" ] && args+=(-b "$REFRATOR_WORKSPACE:/workspace")
+  [ -r /storage/emulated/0 ] && args+=(-b /storage -b /storage/emulated/0:/sdcard)
+  local fake
+  while IFS= read -r fake; do [ -n "$fake" ] && args+=("$fake"); done < <(fake_proc_binds)
+  local env=(
+    HOME=/root USER=root LANG=C.UTF-8 TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}"
+    PATH=/root/.local/bin:/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    TMPDIR=/tmp BROWSER=refrator-open
+    REFRATOR_BRIDGE_URL="${REFRATOR_BRIDGE_URL:-}" REFRATOR_BRIDGE_TOKEN="${REFRATOR_BRIDGE_TOKEN:-}"
+  )
+  # proot itself is a Termux build; keep the host's preload out of the guest.
+  unset LD_PRELOAD
+  if [ $# -gt 0 ]; then
+    exec proot "${args[@]}" /usr/bin/env -i "${env[@]}" /bin/bash -lc "$*"
+  fi
+  exec proot "${args[@]}" /usr/bin/env -i "${env[@]}" /bin/bash -l
+}
+
+cmd_remove() {
+  is_installed || { note "Nada instalado."; return 0; }
+  read -r -p "Apagar $DISTRO_NAME e tudo dentro dele (fora /workspace)? [s/N] " answer
+  [ "$answer" = s ] || [ "$answer" = S ] || { note "Cancelado."; return 0; }
+  require_proot
+  proot --link2symlink -0 rm -rf "$root"
+  note "Removido."
+}
+
+case "${1:-login}" in
+  install) cmd_install ;;
+  login|shell) shift || true; cmd_login "$@" ;;
+  run) shift; [ $# -gt 0 ] || die "uso: refrator-linux run <comando>"; cmd_login "$@" ;;
+  remove|uninstall) cmd_remove ;;
+  -h|--help|help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "comando desconhecido: $1 (use install, login, run, remove)" ;;
+esac

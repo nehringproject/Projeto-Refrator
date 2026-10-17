@@ -2,6 +2,8 @@ package dev.agentworkbench
 
 import android.app.Notification
 import android.content.Context
+import android.content.ComponentName
+import android.content.pm.PackageManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import java.util.concurrent.ConcurrentHashMap
@@ -9,14 +11,23 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class AgentNotificationListenerService : NotificationListenerService() {
-    override fun onListenerConnected() { AgentNotificationRuntime.connected = true }
-    override fun onListenerDisconnected() { AgentNotificationRuntime.connected = false }
-    override fun onNotificationPosted(sbn: StatusBarNotification) { AgentNotificationRuntime.upsert(sbn) }
+    override fun onListenerConnected() { AgentNotificationRuntime.service = this }
+    override fun onListenerDisconnected() { AgentNotificationRuntime.clear() }
+    override fun onDestroy() {
+        AgentNotificationRuntime.clear()
+        super.onDestroy()
+    }
+    override fun onNotificationPosted(sbn: StatusBarNotification) {
+        // Android's grant alone is not the user's authorization to collect content.
+        if (CapabilityAuthorizationStore(this).isAuthorized("notifications")) {
+            AgentNotificationRuntime.upsert(sbn)
+        }
+    }
     override fun onNotificationRemoved(sbn: StatusBarNotification) { AgentNotificationRuntime.remove(sbn.key) }
 }
 
 private object AgentNotificationRuntime {
-    @Volatile var connected = false
+    @Volatile var service: AgentNotificationListenerService? = null
     private val values = ConcurrentHashMap<String, JSONObject>()
 
     fun upsert(sbn: StatusBarNotification) {
@@ -32,6 +43,7 @@ private object AgentNotificationRuntime {
     }
 
     fun remove(key: String) { values.remove(key) }
+    fun clear() { service = null; values.clear() }
     fun list(limit: Int): List<JSONObject> = values.values.sortedByDescending { it.optLong("posted_at") }.take(limit)
     private fun safe(value: CharSequence?): String = RemoteContextRedactor.redactText(value?.toString().orEmpty()).take(2_000)
 }
@@ -39,7 +51,7 @@ private object AgentNotificationRuntime {
 class AgentNotificationController(context: Context) : NotificationAccessBridge {
     private val authorization = CapabilityAuthorizationStore(context)
     override fun status(): String = JSONObject()
-        .put("listener_connected", AgentNotificationRuntime.connected)
+        .put("listener_connected", AgentNotificationRuntime.service != null)
         .put("app_authorized", authorization.isAuthorized(CAPABILITY))
         .toString(2)
 
@@ -48,5 +60,17 @@ class AgentNotificationController(context: Context) : NotificationAccessBridge {
         return JSONObject().put("notifications", JSONArray(AgentNotificationRuntime.list(limit.coerceIn(1, 100)))).toString(2)
     }
 
-    private companion object { const val CAPABILITY = "notifications" }
+    companion object {
+        private const val CAPABILITY = "notifications"
+
+        fun disconnect(context: Context) {
+            AgentNotificationRuntime.service?.requestUnbind()
+            AgentNotificationRuntime.clear()
+            context.packageManager.setComponentEnabledSetting(
+                ComponentName(context, AgentNotificationListenerService::class.java),
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                PackageManager.DONT_KILL_APP,
+            )
+        }
+    }
 }

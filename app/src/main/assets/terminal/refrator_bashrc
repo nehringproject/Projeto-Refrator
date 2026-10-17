@@ -1,0 +1,141 @@
+# Loaded through $ENV by a POSIX-mode bash (see TerminalPanel); leave POSIX mode first, and keep
+# ENV from leaking into every non-interactive child shell.
+set +o posix
+unset ENV
+# Refrator — sessão interativa do terminal embutido.
+# Este arquivo é regravado a cada aba nova; personalize em ~/.bashrc (carregado no final).
+
+HISTFILE="$HOME/.bash_history"
+HISTSIZE=5000
+HISTCONTROL=ignoredups:erasedups
+shopt -s histappend checkwinsize
+
+# Termux packages hardcode /data/data/com.termux/files/usr in scripts (shebangs, pkg, apt hooks);
+# that path does not exist here, so point text scripts at the relocated prefix.
+__refrator_relocate() {
+  local old=/data/data/com.termux/files/usr
+  [ "$PREFIX" = "$old" ] && return 0
+  grep -rlIZ -- "$old" "$PREFIX/bin" "$PREFIX/libexec" 2>/dev/null \
+    | xargs -0 -r sed -i "s|$old|$PREFIX|g" 2>/dev/null
+  # Commands like npm/npx (and anything `npm i -g` adds) are symlinks into lib/node_modules;
+  # grep -r does not follow them, so fix each link's real target as well.
+  local link target
+  for link in "$PREFIX"/bin/*; do
+    [ -L "$link" ] || continue
+    target=$(readlink -f "$link" 2>/dev/null) || continue
+    [ -f "$target" ] && grep -qI -- "$old" "$target" 2>/dev/null && sed -i "s|$old|$PREFIX|g" "$target"
+  done
+  return 0
+}
+__refrator_relocate
+
+# Installs made before these keys existed need them too, or apt cannot verify signatures.
+if [ -n "${APT_CONFIG:-}" ] && [ -f "$APT_CONFIG" ] && ! grep -q 'apt-key' "$APT_CONFIG"; then
+  cat >> "$APT_CONFIG" <<APTCONF
+Dir::Bin::apt-key "$PREFIX/bin/apt-key";
+Dir::Bin::solvers "$PREFIX/lib/apt/solvers/";
+Dir::Bin::planners "$PREFIX/lib/apt/planners/";
+Dir::Etc::trusted "$PREFIX/etc/apt/trusted.gpg";
+Dir::Etc::trustedparts "$PREFIX/etc/apt/trusted.gpg.d/";
+APTCONF
+fi
+
+# pkg picks a random mirror on every run and some are painfully slow; use Termux's official
+# Cloudflare CDN once. Later changes by the user (termux-change-repo) are respected.
+export TERMUX_PKG_NO_MIRROR_SELECT=1
+if [ ! -f "$HOME/.refrator/.mirror-set" ] && [ -d "$PREFIX/etc/apt" ]; then
+  echo "deb https://packages-cf.termux.dev/apt/termux-main stable main" > "$PREFIX/etc/apt/sources.list"
+  mkdir -p "$HOME/.refrator" && touch "$HOME/.refrator/.mirror-set"
+fi
+
+# Installs go through refrator-pkg-install (dpkg cannot unpack into the relocated prefix);
+# everything else (update, search, show, list…) is the real tool, with scripts fixed afterwards.
+__refrator_pkgtool() {
+  local tool=$1; shift
+  case "${1:-}" in
+    install|in|i|add|reinstall)
+      shift
+      refrator-pkg-install "$@"
+      local installed=$?
+      __refrator_relocate
+      return $installed
+      ;;
+    upgrade|up|full-upgrade|dist-upgrade)
+      shift
+      [ "$tool" = pkg ] && command apt-get update
+      refrator-pkg-install --upgrade "$@"
+      local upgraded=$?
+      __refrator_relocate
+      return $upgraded
+      ;;
+    *) command "$tool" "$@"; local s=$?; __refrator_relocate; return $s ;;
+  esac
+}
+pkg() { __refrator_pkgtool pkg "$@"; }
+apt() { __refrator_pkgtool apt "$@"; }
+apt-get() { __refrator_pkgtool apt-get "$@"; }
+
+alias ls='ls --color=auto'
+alias ll='ls -lah'
+alias la='ls -A'
+alias ..='cd ..'
+alias ubuntu='refrator-linux login'
+
+# Paleta 256 cores alinhada ao app: acento terracota, cinzas neutros.
+__rf_accent='\[\e[38;5;173m\]'
+__rf_dim='\[\e[38;5;242m\]'
+__rf_dir='\[\e[38;5;252m\]'
+__rf_ok='\[\e[38;5;114m\]'
+__rf_err='\[\e[38;5;203m\]'
+__rf_off='\[\e[0m\]'
+
+# Caminho curto: o workspace do agente vira "workspace", a home vira "~".
+__refrator_dir() {
+  local d="$PWD"
+  case "$d" in
+    "$REFRATOR_WORKSPACE"*) d="workspace${d#"$REFRATOR_WORKSPACE"}" ;;
+    "$HOME"*) d="~${d#"$HOME"}" ;;
+  esac
+  printf '%s' "$d"
+}
+
+__refrator_git() {
+  command -v git >/dev/null 2>&1 || return 0
+  local branch
+  branch=$(git symbolic-ref --short HEAD 2>/dev/null) || return 0
+  printf ' \001\e[38;5;242m\002on \001\e[38;5;180m\002%s' "$branch"
+}
+
+__refrator_prompt() {
+  local status=$?
+  local mark="${__rf_ok}❯"
+  [ "$status" -ne 0 ] && mark="${__rf_err}❯"
+  PS1="${__rf_dim}╭─ ${__rf_accent}refrator ${__rf_dir}\$(__refrator_dir)\$(__refrator_git)${__rf_off}\n${__rf_dim}╰─${mark}${__rf_off} "
+}
+PROMPT_COMMAND=__refrator_prompt
+
+__refrator_banner() {
+  local a=$'\e[38;5;173m' d=$'\e[38;5;242m' t=$'\e[38;5;252m' o=$'\e[0m'
+  printf '%s' "$a"
+  cat <<'BANNER'
+ ___ ___ ___ ___    _ _____ ___  ___
+| _ \ __| __| _ \  /_\_   _/ _ \| _ \
+|   / _|| _||   / / _ \| || (_) |   /
+|_|_\___|_| |_|_\/_/ \_\_| \___/|_|_\
+BANNER
+  printf '%s' "$o"
+  local android
+  android=$(getprop ro.build.version.release 2>/dev/null)
+  printf '%s bash %s · %s · Android %s%s\n\n' "$d" "${BASH_VERSION%%(*}" "$(uname -m)" "${android:-?}" "$o"
+  printf '  %subuntu%s             %sLinux completo (glibc)%s\n' "$t" "$o" "$d" "$o"
+  printf '  %srefrator-setup%s     %sliga Claude Code/OpenCode%s\n' "$t" "$o" "$d" "$o"
+  printf '  %spkg install %s<x>%s  %sinstala pacotes%s\n' "$t" "$d" "$o" "$d" "$o"
+  printf '  %srefrator-open %s<u>%s %sabre no navegador%s\n\n' "$t" "$d" "$o" "$d" "$o"
+}
+
+if [ -z "$REFRATOR_BANNER_SHOWN" ]; then
+  __refrator_banner
+  export REFRATOR_BANNER_SHOWN=1
+fi
+
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"

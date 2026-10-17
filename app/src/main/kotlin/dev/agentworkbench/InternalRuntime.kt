@@ -57,6 +57,10 @@ data class RuntimePackageRequest(
  * into another app. Downloaded executable packs are explicitly
  * approved by the policy layer, HTTPS-only, hash-pinned and installed atomically.
  */
+/** Shared by the agent runtime and the interactive terminal so both see the same Linux prefix. */
+internal fun internalRuntimeRoot(context: Context): File =
+    File(context.applicationContext.noBackupFilesDir, "internal-runtime").canonicalFile
+
 class InternalRuntime(
     context: Context,
     workspaceRoot: File,
@@ -64,7 +68,7 @@ class InternalRuntime(
 ) {
     private val appContext = context.applicationContext
     val workspace: File = workspaceRoot.canonicalFile
-    val root = File(appContext.noBackupFilesDir, "internal-runtime").canonicalFile
+    val root = internalRuntimeRoot(appContext)
     val binDirectory = File(root, "bin")
     internal val packagesDirectory = File(root, "packages")
     internal val stagingDirectory = File(root, "staging")

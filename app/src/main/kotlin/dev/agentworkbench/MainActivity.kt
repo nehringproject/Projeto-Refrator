@@ -59,6 +59,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -116,6 +121,7 @@ private const val SHIZUKU_PERMISSION_REQUEST = 7_201
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashReporter.install(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         DistributionBindings.scheduleExecutionRecovery(applicationContext)
         setContent {
@@ -136,6 +142,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class WorkbenchDestination {
     CHAT,
+    TERMINAL,
     TOOLS,
     SETTINGS,
 }
@@ -175,6 +182,7 @@ private fun AgentWorkbenchShell(
     var sessions by remember { mutableStateOf<List<ChatSessionSummary>>(emptyList()) }
     var activeSessionId by remember { mutableStateOf<String?>(null) }
     var historyOpen by remember { mutableStateOf(false) }
+    var accountsOpen by remember { mutableStateOf(false) }
     val historyPanelWidthPx = LocalWindowInfo.current.containerSize.width * 0.88f
     var historyOffset by remember(historyPanelWidthPx) {
         mutableFloatStateOf(-historyPanelWidthPx)
@@ -276,110 +284,98 @@ private fun AgentWorkbenchShell(
                 title = {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Image(
-                            painter = painterResource(R.drawable.refrator_icon_art),
+                        Icon(
+                            painter = painterResource(R.drawable.ic_refrator_mark),
                             contentDescription = null,
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(RoundedCornerShape(8.dp)),
+                            modifier = Modifier.size(34.dp),
+                            tint = WorkbenchTokens.Gold,
                         )
                         Column {
                             Text(
                                 text = when (destination) {
-                                    WorkbenchDestination.CHAT -> "Refrator"
-                                    WorkbenchDestination.TOOLS -> "Ferramentas"
-                                    WorkbenchDestination.SETTINGS -> "Configurações"
+                                    WorkbenchDestination.CHAT -> "refrator"
+                                    WorkbenchDestination.TERMINAL -> "terminal"
+                                    WorkbenchDestination.TOOLS -> "ferramentas"
+                                    WorkbenchDestination.SETTINGS -> "configurações"
                                 },
-                                style = MaterialTheme.typography.titleSmall,
+                                style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold,
+                                color = WorkbenchTokens.Text,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
+                            // Model picker: the current model, tap to change it in Settings.
                             Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable(enabled = destination != WorkbenchDestination.SETTINGS) {
+                                        accountsOpen = true
+                                    },
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
                                 Text(
-                                    text = if (destination == WorkbenchDestination.TOOLS) {
-                                        "Nehring Project · Android"
-                                    } else {
-                                        "Nehring Project"
-                                    },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    text = settings.modelId.substringAfterLast('/').ifBlank { settings.preset.displayName }
+                                        .let { model -> if (settings.preset == ProviderPreset.CHATGPT_PLAN) "plano ChatGPT · $model" else model },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = WorkbenchTokens.TextMuted,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 180.dp),
                                 )
-                                if (destination == WorkbenchDestination.CHAT) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(5.dp)
-                                            .background(
-                                                color = WorkbenchTokens.Green,
-                                                shape = RoundedCornerShape(50),
-                                            ),
-                                    )
+                                if (destination != WorkbenchDestination.SETTINGS) {
+                                    Text(text = "⌄", color = WorkbenchTokens.TextMuted, style = MaterialTheme.typography.bodyMedium)
                                 }
                             }
                         }
                     }
                 },
                 navigationIcon = {
-                    when (destination) {
-                        WorkbenchDestination.SETTINGS -> IconButton(onClick = { destination = settingsReturn }) {
+                    if (destination == WorkbenchDestination.SETTINGS) {
+                        IconButton(onClick = { destination = settingsReturn }) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_arrow_back),
                                 contentDescription = "Voltar",
                             )
                         }
-
-                        WorkbenchDestination.CHAT -> Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .padding(start = 2.dp)
-                                    .size(width = 3.dp, height = 16.dp)
-                                    .background(WorkbenchTokens.TextFaint, RoundedCornerShape(50)),
+                    } else {
+                        // The side menu holds navigation (chat, terminal, tools) and the conversations.
+                        IconButton(
+                            onClick = {
+                                libraryView = ChatLibraryView.ACTIVE
+                                scope.launch { sessions = sessionRepository.list() }
+                                openHistory()
+                            },
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_menu),
+                                contentDescription = "Menu",
+                                tint = WorkbenchTokens.Text,
                             )
-                            IconButton(
-                                enabled = !chatBusy,
-                                onClick = {
-                                    libraryView = ChatLibraryView.ACTIVE
-                                    scope.launch { sessions = sessionRepository.list() }
-                                    openHistory()
-                                },
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_history),
-                                    contentDescription = "Conversas",
-                                )
-                            }
                         }
-
-                        WorkbenchDestination.TOOLS -> Unit
                     }
                 },
                 actions = {
-                    if (destination == WorkbenchDestination.CHAT) {
-                        IconButton(
-                            enabled = !chatBusy,
-                            onClick = ::createNewChat,
-                        ) {
-                            Text(
-                                text = "+",
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Normal,
-                                color = WorkbenchTokens.TextMuted,
-                            )
-                        }
-                    }
                     if (destination != WorkbenchDestination.SETTINGS) {
-                        IconButton(onClick = ::openSettings) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_settings),
-                                contentDescription = "Configurações",
-                            )
+                        Surface(
+                            onClick = ::openSettings,
+                            modifier = Modifier
+                                .padding(end = 12.dp)
+                                .size(44.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            color = WorkbenchTokens.Surface,
+                            border = BorderStroke(1.dp, WorkbenchTokens.Border),
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_settings),
+                                    contentDescription = "Configurações",
+                                    modifier = Modifier.size(22.dp),
+                                    tint = WorkbenchTokens.Text,
+                                )
+                            }
                         }
                     }
                 },
@@ -397,13 +393,9 @@ private fun AgentWorkbenchShell(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(
-                    bottom = if (destination != WorkbenchDestination.SETTINGS && !imeVisible) {
-                        132.dp
-                    } else {
-                        0.dp
-                    },
-                ),
+                // No bottom bar any more (navigation lives in the side menu): only keep clear of
+                // the system navigation bar while the keyboard is closed.
+                .then(if (imeVisible) Modifier else Modifier.navigationBarsPadding()),
             color = WorkbenchTokens.Canvas,
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
@@ -433,6 +425,9 @@ private fun AgentWorkbenchShell(
                                 onSettingsChange = { settings = it },
                             )
                         }
+                    }
+                    DestinationSlot(destination == WorkbenchDestination.TERMINAL) {
+                        TerminalPanel(workspacePath = workspacePath)
                     }
                     DestinationSlot(destination == WorkbenchDestination.TOOLS) {
                         ToolsPanel(
@@ -465,52 +460,97 @@ private fun AgentWorkbenchShell(
             }
         }
 
-        // A navegação é realmente flutuante: fica sobre o Scaffold e nunca participa da
-        // medição dele. Assim não existe altura antiga para permanecer reservada sob o composer.
-        if (destination != WorkbenchDestination.SETTINGS && !imeVisible) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 52.dp, vertical = 8.dp),
-            ) {
-                GlassSurface(
-                    shape = RoundedCornerShape(26.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    NavigationBar(
-                        modifier = Modifier.height(70.dp),
-                        containerColor = Color.Transparent,
-                        tonalElevation = 0.dp,
-                    ) {
-                        NavigationBarItem(
-                            selected = destination == WorkbenchDestination.CHAT,
-                            onClick = { destination = WorkbenchDestination.CHAT },
-                            icon = {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_chat),
-                                    contentDescription = null,
-                                )
-                            },
-                            label = { Text("Chat") },
-                            colors = workbenchNavigationColors(),
+
+        if (accountsOpen) {
+            ProviderAccountsSheet(
+                settings = settings,
+                repository = repository,
+                allowLocalCleartext = allowLocalCleartext,
+                onSettingsChange = { settings = it },
+                onOpenSettings = {
+                    accountsOpen = false
+                    openSettings()
+                },
+                onDismiss = { accountsOpen = false },
+            )
+        }
+
+        val crashContext = LocalContext.current
+        var crashReport by remember { mutableStateOf(CrashReporter.pending(crashContext)) }
+        crashReport?.let { report ->
+            AlertDialog(
+                onDismissRequest = {
+                    CrashReporter.clear(crashContext)
+                    crashReport = null
+                },
+                containerColor = WorkbenchTokens.SurfaceRaised,
+                title = { Text("O Refrator fechou inesperadamente") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Copie o relatório abaixo e envie para quem está desenvolvendo o app.",
+                            color = WorkbenchTokens.TextMuted,
                         )
-                        NavigationBarItem(
-                            selected = destination == WorkbenchDestination.TOOLS,
-                            onClick = { destination = WorkbenchDestination.TOOLS },
-                            icon = {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_terminal),
-                                    contentDescription = null,
-                                )
-                            },
-                            label = { Text("Ferramentas") },
-                            colors = workbenchNavigationColors(),
+                        Box(
+                            modifier = Modifier
+                                .heightIn(max = 280.dp)
+                                .verticalScroll(rememberScrollState()),
+                        ) {
+                            Text(
+                                text = report,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = WorkbenchTokens.Text,
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            crashContext.getSystemService(android.content.ClipboardManager::class.java)
+                                ?.setPrimaryClip(android.content.ClipData.newPlainText("Crash do Refrator", report))
+                        },
+                    ) { Text("Copiar") }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            CrashReporter.clear(crashContext)
+                            crashReport = null
+                        },
+                    ) { Text("Fechar") }
+                },
+            )
+        }
+
+        CliApprovalCenter.pending.firstOrNull()?.let { entry ->
+            AlertDialog(
+                onDismissRequest = {},
+                containerColor = WorkbenchTokens.SurfaceRaised,
+                title = { Text("Agente do terminal pede permissão") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = entry.prepared.invocation.toolName,
+                            fontFamily = FontFamily.Monospace,
+                            color = WorkbenchTokens.Gold,
+                        )
+                        Text(entry.prepared.request.summary, color = WorkbenchTokens.Text)
+                        Text(
+                            text = entry.prepared.decision.reason,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = WorkbenchTokens.TextMuted,
                         )
                     }
-                }
-            }
+                },
+                confirmButton = {
+                    TextButton(onClick = { CliApprovalCenter.resolve(entry, true) }) { Text("Permitir") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { CliApprovalCenter.resolve(entry, false) }) { Text("Negar") }
+                },
+            )
         }
 
         if (historyOpen) {
@@ -538,6 +578,11 @@ private fun AgentWorkbenchShell(
                 },
         ) {
             ChatHistoryPanel(
+                destination = destination,
+                onNavigate = { target ->
+                    closeHistory()
+                    if (target == WorkbenchDestination.SETTINGS) openSettings() else destination = target
+                },
                 sessions = sessions,
                 activeSessionId = activeSessionId,
                 busy = chatBusy,
@@ -657,11 +702,11 @@ private fun AgentWorkbenchShell(
 
 @Composable
 private fun workbenchNavigationColors() = NavigationBarItemDefaults.colors(
-    selectedIconColor = WorkbenchTokens.Green,
-    selectedTextColor = WorkbenchTokens.Green,
-    indicatorColor = WorkbenchTokens.GreenSoft,
-    unselectedIconColor = WorkbenchTokens.TextMuted,
-    unselectedTextColor = WorkbenchTokens.TextMuted,
+    selectedIconColor = WorkbenchTokens.Text,
+    selectedTextColor = WorkbenchTokens.Text,
+    indicatorColor = WorkbenchTokens.SurfaceHigh,
+    unselectedIconColor = WorkbenchTokens.TextFaint,
+    unselectedTextColor = WorkbenchTokens.TextFaint,
 )
 
 private fun ExecutionMode.displayName(): String = when (this) {
@@ -688,6 +733,8 @@ private fun ChatHistoryPanel(
     onRestore: (String) -> Unit,
     onLibraryView: (ChatLibraryView) -> Unit,
     onSearch: (String) -> Unit,
+    destination: WorkbenchDestination,
+    onNavigate: (WorkbenchDestination) -> Unit,
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var editingSession by remember { mutableStateOf<ChatSessionSummary?>(null) }
@@ -709,6 +756,41 @@ private fun ChatHistoryPanel(
                 .padding(top = 48.dp, start = 16.dp, end = 16.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // Navigation (replaces the old bottom bar), then the conversations below.
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                listOf(
+                    Triple(WorkbenchDestination.CHAT, R.drawable.ic_chat, "Chat"),
+                    Triple(WorkbenchDestination.TERMINAL, R.drawable.ic_terminal, "Terminal"),
+                    Triple(WorkbenchDestination.TOOLS, R.drawable.ic_tools, "Ferramentas"),
+                    Triple(WorkbenchDestination.SETTINGS, R.drawable.ic_settings, "Configurações"),
+                ).forEach { (target, icon, label) ->
+                    val selected = destination == target
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) WorkbenchTokens.SurfaceHigh else Color.Transparent)
+                            .clickable { onNavigate(target) }
+                            .padding(horizontal = 12.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        Icon(
+                            painter = painterResource(icon),
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = if (selected) WorkbenchTokens.Text else WorkbenchTokens.TextMuted,
+                        )
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            color = if (selected) WorkbenchTokens.Text else WorkbenchTokens.TextMuted,
+                        )
+                    }
+                }
+            }
+            HorizontalDivider(color = WorkbenchTokens.BorderSoft)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -913,9 +995,20 @@ private fun DestinationSlot(
     active: Boolean,
     content: @Composable () -> Unit,
 ) {
+    // Fade + slight rise when a destination becomes visible; inactive slots stay alive at size 0.
+    val reveal by animateFloatAsState(
+        targetValue = if (active) 1f else 0f,
+        animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+        label = "destinationReveal",
+    )
     Box(
         modifier = if (active) {
-            Modifier.fillMaxSize()
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    alpha = reveal
+                    translationY = (1f - reveal) * 12.dp.toPx()
+                }
         } else {
             Modifier
                 .size(0.dp)

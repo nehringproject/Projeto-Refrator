@@ -29,9 +29,17 @@ object DistributionBindings {
     ): CommandSpec? =
         PowerRunner(workspaceRoot).shellCommand(commandId, script)
 
-    fun privilegedShellBridge(
-        @Suppress("UNUSED_PARAMETER") context: Context,
-    ): PrivilegedShellBridge = ShizukuShellBridge
+    fun privilegedShellBridge(context: Context): PrivilegedShellBridge =
+        object : PrivilegedShellBridge by ShizukuShellBridge {
+            private val authorization = CapabilityAuthorizationStore(context.applicationContext)
+
+            override suspend fun execute(script: String, timeoutMs: Int, maxOutputBytes: Int): String {
+                check(authorization.isAuthorized("shizuku")) {
+                    "Shizuku não foi autorizado na Central de Capacidades."
+                }
+                return ShizukuShellBridge.execute(script, timeoutMs, maxOutputBytes)
+            }
+        }
 
     fun shadowDisplayBridge(context: Context): ShadowDisplayBridge =
         ShizukuShadowDisplayBridge.get(context.applicationContext)

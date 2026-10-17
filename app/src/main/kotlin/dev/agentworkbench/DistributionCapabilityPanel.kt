@@ -57,11 +57,14 @@ fun DistributionCapabilityPanel() {
     val activity = context as Activity
     val scope = rememberCoroutineScope()
     val authorizations = remember(context) { CapabilityAuthorizationStore(context) }
+    val deviceAccess = remember(context) { DeviceAccessController(context) }
     val executions = remember(context) { ExecutionRepository(context) }
     val documentTree = remember(context) { DocumentTreeAccess(context) }
     var revision by remember { mutableIntStateOf(0) }
     var mediaProjectionGranted by remember { mutableStateOf(MediaProjectionGrantStore.data != null) }
     var vpnPrepared by remember { mutableStateOf(VpnService.prepare(context) == null) }
+    var accessBusy by remember { mutableStateOf(false) }
+    var accessMessage by remember { mutableStateOf<String?>(null) }
     val packageUri = remember(context) { Uri.parse("package:${context.packageName}") }
 
     val refresh: () -> Unit = { revision += 1 }
@@ -118,6 +121,11 @@ fun DistributionCapabilityPanel() {
         authorizations.setAuthorized(id, enabled)
         revision += 1
         scope.launch {
+            if (!enabled && id in DeviceAccessController.CAPABILITIES) {
+                runCatching { deviceAccess.disconnect(id) }
+                    .onFailure { accessMessage = "Confira o acesso no Android: ${it.message}" }
+                refresh()
+            }
             executions.setCapabilityLease(id, enabled, scopeJson, source)
         }
     }
@@ -184,13 +192,37 @@ fun DistributionCapabilityPanel() {
             Text("Central de Capacidades", style = MaterialTheme.typography.titleMedium)
             Text(
                 "Cada acesso exige a concessão do Android e uma autorização separada no app. " +
-                    "Revogar a chave interna interrompe novas ações do agente mesmo se o Android continuar concedendo.",
+                    "Desligar Accessibility ou Notificações também desconecta o serviço. " +
+                    "Você pode conceder e ativar novamente quando quiser.",
                 style = MaterialTheme.typography.bodySmall,
             )
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !accessBusy,
+                onClick = {
+                    accessBusy = true
+                    accessMessage = null
+                    scope.launch {
+                        runCatching { deviceAccess.suspendAll() }
+                            .onSuccess {
+                                mediaProjectionGranted = false
+                                accessMessage = "Acessos ao aparelho suspensos. Todas as funções continuam disponíveis para reativação. " +
+                                    "A permissão do Shizuku e a leitura de notificações também podem ser revogadas nas configurações de origem. " +
+                                    "A aceitação por apps bancários depende das regras de cada banco."
+                            }
+                            .onFailure { accessMessage = "Suspensão incompleta. Confira os acessos no Android: ${it.message}" }
+                        accessBusy = false
+                        refresh()
+                    }
+                },
+            ) { Text(if (accessBusy) "Suspendendo acessos…" else "Suspender acessos ao aparelho") }
+            accessMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             CapabilityRow("Accessibility", "Árvore de UI, gestos e ações globais", accessibilityGranted, authorized("accessibility"), "AccessibilityService", {
+                deviceAccess.prepareAccessibility()
                 open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }) { setAuthorized("accessibility", it, "android_accessibility", "all_enabled_apps") }
             CapabilityRow("Notificações", "Lista local redigida", notificationListenerGranted, authorized("notifications"), "NotificationListenerService", {
+                deviceAccess.prepareNotifications()
                 open(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
             }) { setAuthorized("notifications", it, "notification_listener", "posted_notifications") }
             if (BuildConfig.DEVELOPER_BUILD) {
@@ -298,8 +330,18 @@ private fun CapabilityRow(
     }
 }
 
-private fun secureComponentEnabled(context: Context, key: String, component: ComponentName): Boolean =
-    Settings.Secure.getString(context.contentResolver, key)
+private fun secureComponentEnabled(context: Context, key: String, component: ComponentName): Boolean {
+    val manager = context.packageManager
+    val enabled = when (manager.getComponentEnabledSetting(component)) {
+        PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> true
+        PackageManager.COMPONENT_ENABLED_STATE_DEFAULT -> {
+            @Suppress("DEPRECATION")
+            manager.getServiceInfo(component, PackageManager.MATCH_DISABLED_COMPONENTS).enabled
+        }
+        else -> false
+    }
+    return enabled && Settings.Secure.getString(context.contentResolver, key)
         ?.split(':')
         ?.any { ComponentName.unflattenFromString(it) == component }
         ?: false
+}

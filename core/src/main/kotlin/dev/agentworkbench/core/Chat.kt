@@ -24,6 +24,8 @@ data class ChatMessage(
     val error: String? = null,
     /** Raciocínio/"thinking" transmitido separadamente do texto final da resposta. */
     val reasoning: String = "",
+    /** Quando a mensagem foi criada; 0 em sessões salvas antes deste campo existir. */
+    val createdAtMillis: Long = 0L,
 )
 
 data class ChatUsage(
@@ -66,6 +68,7 @@ object ChatReducer {
                     role = ChatRole.USER,
                     text = text,
                     status = ChatMessageStatus.COMPLETE,
+                    createdAtMillis = System.currentTimeMillis(),
                 ),
                 ChatMessage(
                     id = assistantMessageId,
@@ -75,6 +78,7 @@ object ChatReducer {
                     providerId = providerId,
                     providerDisplayName = providerDisplayName,
                     requestedModelId = requestedModelId,
+                    createdAtMillis = System.currentTimeMillis(),
                 ),
             ),
             activeTurnId = turnId,
@@ -168,6 +172,7 @@ object ChatReducer {
                 providerId = providerId,
                 providerDisplayName = providerDisplayName,
                 requestedModelId = requestedModelId,
+                createdAtMillis = System.currentTimeMillis(),
             ),
             activeTurnId = turnId,
             activeProviderId = providerId,

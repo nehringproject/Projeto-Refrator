@@ -14,6 +14,8 @@ dependencyResolutionManagement {
         maven("https://jitpack.io") {
             content {
                 includeGroup("cz.adaptech.tesseract4android")
+                // Apache-2.0 terminal-emulator/terminal-view only; the GPL Termux app is not used.
+                includeGroup("com.github.termux.termux-app")
             }
         }
     }

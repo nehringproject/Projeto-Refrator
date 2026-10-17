@@ -373,6 +373,7 @@ class ChatSessionRepository(context: Context) {
         .putNullable("resolved_model", message.resolvedModelId)
         .putNullable("error", message.error)
         .put("reasoning", message.reasoning)
+        .put("created_at", message.createdAtMillis)
 
     private fun decodeMessage(value: JSONObject): ChatMessage = normalizeMessage(
         ChatMessage(
@@ -387,6 +388,7 @@ class ChatSessionRepository(context: Context) {
             error = value.optNullableString("error"),
             // Ausente em sessões salvas antes deste campo existir; optString já cai para "".
             reasoning = value.optString("reasoning"),
+            createdAtMillis = value.optLong("created_at", 0L),
         ),
     )
 

@@ -46,7 +46,9 @@ class ShizukuUserService() : IPrivilegedShellService.Stub() {
     @SuppressLint("WrongConstant") // Flags de sistema deliberadas: este serviço executa como UID shell via Shizuku.
     private fun createShadowDisplayApi34(surface: Surface, width: Int, height: Int, densityDpi: Int): Int {
         releaseShadowDisplay()
-        val flags = FLAG_OWN_CONTENT_ONLY or FLAG_SUPPORTS_TOUCH or
+        // PUBLIC (with OWN_CONTENT_ONLY, so nothing is mirrored) keeps the display out of the
+        // "private" class that AccessibilityManager ignores; shadow_ui reads it through that.
+        val flags = FLAG_PUBLIC or FLAG_OWN_CONTENT_ONLY or FLAG_SUPPORTS_TOUCH or
             FLAG_DESTROY_CONTENT_ON_REMOVAL or FLAG_TRUSTED or
             FLAG_ALWAYS_UNLOCKED or FLAG_OWN_FOCUS
         val config = VirtualDisplayConfig.Builder(
@@ -244,6 +246,7 @@ class ShizukuUserService() : IPrivilegedShellService.Stub() {
     private companion object {
         val PACKAGE_NAME = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")
         const val SHELL_PACKAGE = "com.android.shell"
+        const val FLAG_PUBLIC = 1 shl 0
         const val FLAG_OWN_CONTENT_ONLY = 1 shl 3
         const val FLAG_SUPPORTS_TOUCH = 1 shl 6
         const val FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 shl 8

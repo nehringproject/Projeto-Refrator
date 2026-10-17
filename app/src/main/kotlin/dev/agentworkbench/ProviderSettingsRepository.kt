@@ -55,6 +55,14 @@ enum class ProviderPreset(
         protocol = HttpProviderProtocol.OPENAI_RESPONSES,
         requiresApiKey = true,
     ),
+    CHATGPT_PLAN(
+        displayName = "ChatGPT (seu plano)",
+        description = "Usa seu plano Go/Plus/Pro via Sign in with ChatGPT (programa oficial da OpenAI).",
+        defaultEndpoint = "https://api.openai.com/v1/responses",
+        defaultModel = "gpt-5.6-sol",
+        protocol = HttpProviderProtocol.CHATGPT_PLAN_RESPONSES,
+        requiresApiKey = false,
+    ),
     OPENROUTER(
         displayName = "OpenRouter",
         description = "API compatível para múltiplas famílias de modelos.",
@@ -92,6 +100,14 @@ enum class ProviderPreset(
         description = "Modelos selecionados para agentes de codigo, com opções gratuitas e pagas.",
         defaultEndpoint = "https://opencode.ai/zen/v1/chat/completions",
         defaultModel = "deepseek-v4-flash-free",
+        protocol = HttpProviderProtocol.OPENAI_COMPATIBLE_CHAT,
+        requiresApiKey = true,
+    ),
+    ANTHROPIC(
+        displayName = "Claude (API Anthropic)",
+        description = "Chave do Console da Anthropic, pela compatibilidade oficial com o formato OpenAI.",
+        defaultEndpoint = "https://api.anthropic.com/v1/chat/completions",
+        defaultModel = "claude-sonnet-5-5",
         protocol = HttpProviderProtocol.OPENAI_COMPATIBLE_CHAT,
         requiresApiKey = true,
     ),
@@ -537,6 +553,32 @@ class ProviderSettingsRepository(
                 return ProviderBuildResult.Rejected(warning)
             }
             return ProviderBuildResult.Ready(LocalGgufModelProvider(appContext, model))
+        }
+        if (settings.preset == ProviderPreset.CHATGPT_PLAN) {
+            val auth = ChatGptPlanAuth(appContext)
+            if (!auth.isSignedIn) {
+                return ProviderBuildResult.Rejected("Toque em \"Continuar com ChatGPT\" para usar seu plano.")
+            }
+            return ProviderBuildResult.Ready(
+                remoteSafe(
+                    HttpModelProvider(
+                        HttpProviderConfig(
+                            providerId = "chatgpt-plan",
+                            displayName = settings.preset.displayName,
+                            protocol = HttpProviderProtocol.CHATGPT_PLAN_RESPONSES,
+                            endpoint = settings.endpoint.trim(),
+                            modelId = settings.modelId.trim(),
+                            locality = dev.agentworkbench.core.ProviderLocality.REMOTE,
+                            authorizationToken = null,
+                            // The plan route rejects safety_identifier; tokens live 1 h and are
+                            // refreshed off the main thread right before each request.
+                            safetyIdentifier = null,
+                            allowLocalCleartext = false,
+                            tokenProvider = { auth.validAccessToken() },
+                        ),
+                    ),
+                ),
+            )
         }
         val token = secret(settings)
         if (
@@ -1003,6 +1045,7 @@ class ProviderSettingsRepository(
 
     private fun liteLlmModelName(preset: ProviderPreset, model: String): String = when (preset) {
         ProviderPreset.OPENAI -> "openai/$model"
+        ProviderPreset.ANTHROPIC -> "anthropic/$model"
         ProviderPreset.OPENROUTER -> "openrouter/$model"
         ProviderPreset.GROQ -> "groq/$model"
         ProviderPreset.NVIDIA -> "nvidia_nim/$model"
@@ -1021,6 +1064,7 @@ class ProviderSettingsRepository(
         ProviderPreset.DEMO,
         ProviderPreset.LOCAL_GGUF,
         ProviderPreset.LITELLM,
+        ProviderPreset.CHATGPT_PLAN,
         -> model
     }
 

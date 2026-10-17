@@ -16,6 +16,10 @@ the licenses of third-party components.
 | JGit | 7.6.0.202603022253-r | Eclipse Distribution License 1.0 | https://github.com/eclipse-jgit/jgit |
 | Shizuku API and provider | 13.1.5 | MIT | https://github.com/RikkaApps/Shizuku-API |
 | Tesseract OCR and tesseract4android | 5.x / 4.9.0 | Apache-2.0 | https://github.com/tesseract-ocr/tesseract and https://github.com/adaptech-cz/Tesseract4Android |
+| Termux `terminal-emulator` and `terminal-view` (derived from Terminal Emulator for Android) | v0.118.3 | Apache-2.0 | https://github.com/termux/termux-app |
+
+Only the two Apache-2.0 terminal libraries listed above are linked. The GPLv3
+Termux application and its `termux-shared` library are not part of Refrator.
 
 The Python process also contains CPython and packages resolved by
 `python-runtime/build.gradle.kts`, including pip, Pydantic, PyYAML, packaging,

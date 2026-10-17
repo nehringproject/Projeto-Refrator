@@ -91,8 +91,18 @@ internal class EmbeddedRuntimePackManager(
         environment["GIT_SSL_CAINFO"] = File(prefix, "etc/tls/cert.pem").path
         environment["PATH"] = "${File(prefix, "bin").path}:$currentPath"
         environment["LD_LIBRARY_PATH"] = File(prefix, "lib").path
+        // ncurses has the original Termux prefix compiled in; without this readline, less, vim
+        // and friends report "terminals database is inaccessible" and fall back to a dumb TTY.
+        environment["TERMINFO"] = File(prefix, "share/terminfo").path
         environment["TERMUX_EXEC__EXECVE_CALL__INTERCEPT"] = "enable"
-        environment["TERMUX_EXEC__SYSTEM_LINKER_EXEC__MODE"] = "force"
+        // targetSdk >= 29 cannot execve() app-data files, so every exec must go through the system
+        // linker. The SDK 28 Dev build can exec directly, which proot and static binaries require.
+        environment["TERMUX_EXEC__SYSTEM_LINKER_EXEC__MODE"] =
+            if (context.applicationInfo.targetSdkVersion >= Build.VERSION_CODES.Q) "force" else "disable"
+        environment["PROOT_TMP_DIR"] = temp.path
+        // Termux's proot has its loader path compiled for com.termux; point it at this prefix.
+        environment["PROOT_LOADER"] = File(prefix, "libexec/proot/loader").path
+        environment["PROOT_LOADER_32"] = File(prefix, "libexec/proot/loader32").path
         File(prefix, "lib/libtermux-exec-linker-ld-preload.so").takeIf(File::isFile)?.let {
             environment["LD_PRELOAD"] = it.path
         }
@@ -253,6 +263,11 @@ internal class EmbeddedRuntimePackManager(
             Dir::Etc::SourceParts "${prefix.path}/etc/apt/sources.list.d";
             Dir::Bin::dpkg "${prefix.path}/bin/dpkg";
             Dir::Bin::Methods "${prefix.path}/lib/apt/methods/";
+            Dir::Bin::apt-key "${prefix.path}/bin/apt-key";
+            Dir::Bin::solvers "${prefix.path}/lib/apt/solvers/";
+            Dir::Bin::planners "${prefix.path}/lib/apt/planners/";
+            Dir::Etc::trusted "${prefix.path}/etc/apt/trusted.gpg";
+            Dir::Etc::trustedparts "${prefix.path}/etc/apt/trusted.gpg.d/";
             Acquire::https::CaInfo "${prefix.path}/etc/tls/cert.pem";
             Acquire::AllowInsecureRepositories "false";
             """.trimIndent() + "\n",

@@ -15,48 +15,53 @@ import androidx.compose.ui.unit.sp
 
 /** Semantic colors used throughout the Refrator interface. */
 internal object WorkbenchTokens {
-    val Canvas = Color(0xFF0A0C11)
-    val Navigation = Color(0xFF0D1117)
-    val Surface = Color(0xFF11161D)
-    val SurfaceRaised = Color(0xFF151B23)
-    val SurfaceHigh = Color(0xFF1B232D)
-    val Border = Color(0xFF2A3542)
-    val BorderSoft = Color(0xFF1F2833)
+    // Near-black surfaces stepped by lightness only, with one red accent (Refrator identity).
+    val Canvas = Color(0xFF070707)
+    val Navigation = Color(0xFF0B0B0B)
+    val Surface = Color(0xFF101010)
+    val SurfaceRaised = Color(0xFF151515)
+    val SurfaceHigh = Color(0xFF1D1D1D)
+    val Border = Color(0xFF262626)
+    val BorderSoft = Color(0xFF1B1B1B)
 
-    // Primary action and selection.
-    val Gold = Color(0xFFE8B85C)
-    val GoldSoft = Color(0xFF4A3B22)
+    // The single accent: primary action, focus, selection and the brand mark.
+    val Gold = Color(0xFFE5383B)
+    val GoldSoft = Color(0xFF2B1214)
 
-    // Identity and brand accent.
-    val Coral = Color(0xFFE8899A)
-    val CoralSoft = Color(0xFF432730)
+    // The user's own messages: neutral, the accent is reserved for a few small details.
+    val UserBubble = Color(0xFF1A1A1A)
+    val UserBubbleBorder = Color(0xFF242424)
 
-    // Error and destructive action.
-    val Red = Color(0xFFD5495F)
-    val RedSoft = Color(0xFF44212A)
+    // Identity accent, kept muted so it never competes with the primary action.
+    val Coral = Color(0xFFC9A39A)
+    val CoralSoft = Color(0xFF2E2523)
+
+    // Error and destructive action (same family as the accent, slightly warmer).
+    val Red = Color(0xFFFF5A5F)
+    val RedSoft = Color(0xFF3A1416)
 
     // Success and completed work.
-    val Green = Color(0xFF7FD1A8)
-    val GreenSoft = Color(0xFF1D3A2C)
+    val Green = Color(0xFF7FC8A0)
+    val GreenSoft = Color(0xFF1B2E24)
 
     // Profiles and skills.
-    val Purple = Color(0xFFB39EE0)
-    val PurpleSoft = Color(0xFF31294A)
+    val Purple = Color(0xFFA99BD8)
+    val PurpleSoft = Color(0xFF26223A)
 
     // Neutral information and reasoning state.
-    val Sky = Color(0xFF7FB8E0)
-    val SkySoft = Color(0xFF1E3346)
+    val Sky = Color(0xFF8AB4D8)
+    val SkySoft = Color(0xFF1B2733)
 
-    val Text = Color(0xFFF1F3F5)
-    val TextMuted = Color(0xFF8B96A3)
-    val TextFaint = Color(0xFF5F6975)
+    val Text = Color(0xFFF2F2F2)
+    val TextMuted = Color(0xFF9A9A9A)
+    val TextFaint = Color(0xFF5E5E5E)
 }
 
 private val WorkbenchScheme = darkColorScheme(
     primary = WorkbenchTokens.Gold,
-    onPrimary = Color(0xFF171005),
+    onPrimary = Color(0xFFFFFFFF),
     primaryContainer = WorkbenchTokens.GoldSoft,
-    onPrimaryContainer = Color(0xFFFFE4A3),
+    onPrimaryContainer = Color(0xFFFFD6D7),
     secondary = WorkbenchTokens.Green,
     onSecondary = Color(0xFF0A2118),
     secondaryContainer = WorkbenchTokens.GreenSoft,
@@ -84,7 +89,7 @@ private val WorkbenchScheme = darkColorScheme(
     outlineVariant = WorkbenchTokens.BorderSoft,
     inverseSurface = WorkbenchTokens.Text,
     inverseOnSurface = WorkbenchTokens.Canvas,
-    inversePrimary = Color(0xFF765600),
+    inversePrimary = Color(0xFF8A3B22),
     scrim = Color.Black,
 )
 
@@ -124,8 +129,8 @@ private val WorkbenchTypography = Typography(
     bodyLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Normal,
-        fontSize = 15.sp,
-        lineHeight = 23.sp,
+        fontSize = 16.sp,
+        lineHeight = 25.sp,
     ),
     bodyMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,

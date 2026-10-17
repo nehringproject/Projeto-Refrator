@@ -112,7 +112,14 @@ object ShizukuShellBridge : PrivilegedShellBridge {
         }
         val connected = connect()
         return withContext(Dispatchers.IO) {
-            connected.execute(script, timeoutMs, maxOutputBytes)
+            try {
+                connected.execute(script, timeoutMs, maxOutputBytes)
+            } catch (dead: android.os.DeadObjectException) {
+                // The Shizuku user-service process was recycled (common after the app sat in the
+                // background); the cached binder is dead. Reconnect once and retry the same script.
+                service = null
+                connect().execute(script, timeoutMs, maxOutputBytes)
+            }
         }
     }
 
@@ -121,6 +128,16 @@ object ShizukuShellBridge : PrivilegedShellBridge {
         check(current.serverRunning) { "O serviço Shizuku não está rodando." }
         check(current.permissionGranted) { "Autorize o Refrator no Shizuku." }
         return connect()
+    }
+
+    suspend fun disconnect() = connectionMutex.withLock {
+        // Never start a privileged process just to stop it.
+        if (service != null) {
+            withContext(Dispatchers.Main.immediate) {
+                Shizuku.unbindUserService(userServiceArgs, connection, true)
+            }
+        }
+        service = null
     }
 
     private suspend fun connect(): IPrivilegedShellService = connectionMutex.withLock {

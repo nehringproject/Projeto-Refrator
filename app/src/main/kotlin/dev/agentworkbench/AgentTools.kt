@@ -1586,7 +1586,7 @@ class AgentToolbox(
             prepared.arguments.getInt("x2"), prepared.arguments.getInt("y2"),
             prepared.arguments.intIn("duration_ms", 350, 50, 10_000),
         )
-        "shadow_text" -> requireShadowDisplay().text(prepared.arguments.requiredString("text", 500))
+        "shadow_text" -> shadowText(prepared.arguments.requiredString("text", 500))
         "shadow_key" -> requireShadowDisplay().keyEvent(prepared.arguments.intIn("key_code", 4, 0, 1_000))
         "android_device_info" -> deviceInfo()
         "workspace_list" -> listWorkspace(prepared.arguments)
@@ -2541,6 +2541,29 @@ class AgentToolbox(
     }
 
     private fun requireShadowDisplay(): ShadowDisplayBridge = shadowDisplay
+
+    /**
+     * `input text` (shell) only handles printable ASCII. Anything else (accents, emoji) goes through
+     * accessibility ACTION_SET_TEXT on the focused field of the parallel display, falling back to
+     * clipboard + KEYCODE_PASTE there when accessibility is off.
+     */
+    private suspend fun shadowText(text: String): String {
+        val shadow = requireShadowDisplay()
+        if (text.all { it.code in 0x20..0x7E }) return shadow.text(text)
+        val displayId = shadow.snapshot().displayId ?: throw ToolValidationException("ShadowDisplay não está ativo.")
+        runCatching { accessibility.setFocusedText(displayId, text) }.getOrNull()?.let { return it }
+        withContext(Dispatchers.Main) {
+            appContext.getSystemService(android.content.ClipboardManager::class.java)
+                ?.setPrimaryClip(android.content.ClipData.newPlainText("Refrator", text))
+        }
+        shadow.keyEvent(android.view.KeyEvent.KEYCODE_PASTE)
+        return JSONObject()
+            .put("ok", true)
+            .put("display_id", displayId)
+            .put("method", "clipboard_paste")
+            .put("chars", text.length)
+            .toString()
+    }
 
     private fun accessMatrix(): String {
         val tree = documentTree.status()

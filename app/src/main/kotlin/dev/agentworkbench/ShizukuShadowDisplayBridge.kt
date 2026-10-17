@@ -48,6 +48,7 @@ class ShizukuShadowDisplayBridge private constructor(private val context: Contex
     }
 
     override suspend fun start(width: Int, height: Int, densityDpi: Int): ShadowDisplaySnapshot {
+        requireAuthorized()
         require(width in 360..1920 && height in 640..3200)
         require(densityDpi in 120..640)
         releaseRuntime(clearPreference = false, stopKeepAlive = false)
@@ -88,9 +89,11 @@ class ShizukuShadowDisplayBridge private constructor(private val context: Contex
     override suspend fun stop() = releaseRuntime(clearPreference = true, stopKeepAlive = true)
 
     private suspend fun releaseRuntime(clearPreference: Boolean, stopKeepAlive: Boolean) {
-        runCatching {
-            withContext(Dispatchers.IO) {
-                ShizukuShellBridge.connectedService().releaseShadowDisplay()
+        if (displayId != null || reader != null) {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    ShizukuShellBridge.connectedService().releaseShadowDisplay()
+                }
             }
         }
         reader?.setOnImageAvailableListener(null, null)
@@ -149,7 +152,9 @@ class ShizukuShadowDisplayBridge private constructor(private val context: Contex
     }
 
     override fun latestFrame(): Bitmap? = synchronized(frameLock) {
-        latest?.copy(Bitmap.Config.ARGB_8888, false)
+        if (CapabilityAuthorizationStore(context).isAuthorized("shizuku")) {
+            latest?.copy(Bitmap.Config.ARGB_8888, false)
+        } else null
     }
 
     private fun consumeFrame(source: ImageReader, targetWidth: Int, targetHeight: Int) {
@@ -176,7 +181,16 @@ class ShizukuShadowDisplayBridge private constructor(private val context: Contex
     }
 
     private suspend fun <T> serviceCall(block: IPrivilegedShellService.() -> T): T =
-        withContext(Dispatchers.IO) { ShizukuShellBridge.connectedService().block() }
+        withContext(Dispatchers.IO) {
+            requireAuthorized()
+            ShizukuShellBridge.connectedService().block()
+        }
+
+    private fun requireAuthorized() {
+        check(CapabilityAuthorizationStore(context).isAuthorized("shizuku")) {
+            "Shizuku não foi autorizado na Central de Capacidades."
+        }
+    }
 
     companion object {
         const val PREFERENCES = "shadow-display"
