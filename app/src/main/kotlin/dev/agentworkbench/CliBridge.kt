@@ -38,7 +38,10 @@ import org.json.JSONObject
  * shown to the user through [CliApprovalCenter] before it runs.
  */
 internal object CliBridge {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // A broken or hostile local connection must never take the app down with it.
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + kotlinx.coroutines.CoroutineExceptionHandler { _, _ -> },
+    )
     private var server: ServerSocket? = null
     private lateinit var appContext: Context
     private lateinit var workspace: File
@@ -64,7 +67,7 @@ internal object CliBridge {
     private fun acceptLoop(socket: ServerSocket) {
         while (!socket.isClosed) {
             val client = runCatching { socket.accept() }.getOrNull() ?: continue
-            scope.launch { client.use { handle(it) } }
+            scope.launch { client.use { runCatching { handle(it) } } }
         }
     }
 

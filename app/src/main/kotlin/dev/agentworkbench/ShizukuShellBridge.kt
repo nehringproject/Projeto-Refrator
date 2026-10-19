@@ -154,6 +154,6 @@ object ShizukuShellBridge : PrivilegedShellBridge {
         }
     }
 
-    private const val SHIZUKU_SERVICE_VERSION = 5
+    private const val SHIZUKU_SERVICE_VERSION = 6
     private const val CONNECTION_TIMEOUT_MS = 8_000L
 }

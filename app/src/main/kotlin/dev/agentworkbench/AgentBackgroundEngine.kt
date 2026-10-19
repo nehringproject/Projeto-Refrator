@@ -59,7 +59,9 @@ class AgentBackgroundEngine(
         val settings = executions.settingsFor(run)
             ?: providers.defaults(preset).copy(modelId = run.modelId)
         val allowLocalCleartext = TransportSecurityPreferences(appContext).allowLocalCleartext()
-        val routes = providers.buildProviderRoutes(settings, allowLocalCleartext)
+        // A prisma's own provider is never swapped for the app's other ones in the background either.
+        val prisma = runCatching { BotRepository(appContext).bySession(run.sessionId) }.getOrNull()
+        val routes = providers.routesForPrisma(prisma, settings, allowLocalCleartext)
         if (routes.isEmpty()) {
             executions.checkpointRun(run.id, AgentRunState.FAILED, "Nenhum provider configurado está disponível.")
             return
@@ -259,6 +261,7 @@ class AgentBackgroundEngine(
                                 state = ChatReducer.applyProviderEvent(state, turnId, event)
                                 persistStreamingCheckpoint()
                             }
+                            is ProviderEvent.RateLimits -> Unit
                             is ProviderEvent.ModelResolved,
                             is ProviderEvent.Usage,
                             is ProviderEvent.Continuation,
@@ -621,10 +624,15 @@ class AgentBackgroundEngine(
         )
         val baseText = (base.parts.firstOrNull() as? MessagePart.Text)?.value.orEmpty()
         val selectedProfile = agentPlatform.selectedProfile(settings)
+        // Background turns (routines, resumed tasks) keep the prisma's persona and plugins too.
+        val bot = BotRepository(appContext).bySession(conversationId)
         return contextMemory.assemble(
             baseEnvironment = baseText + selectedProfile.systemPrompt.takeIf { it.isNotBlank() }
                 ?.let { "\n\n<agent_profile id=\"${selectedProfile.id}\">\n$it\n</agent_profile>" }
-                .orEmpty(),
+                .orEmpty() +
+                bot?.let { "\n\n" + it.systemPrompt() + societyContext(appContext, it) }.orEmpty() +
+                pluginsPrompt(appContext) +
+                AccountUsage.awareness(appContext, settings),
             workspaceId = workspaceId,
             conversationId = conversationId,
             contextWindowTokens = providers.effectiveContextWindowTokens(settings),

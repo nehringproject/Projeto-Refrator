@@ -50,6 +50,10 @@ class ChatSessionRepository(context: Context) {
         "conversation-room-migration",
         Context.MODE_PRIVATE,
     )
+    // Last-message preview for the chat list, kept beside the Room index (no schema change).
+    private val previews = appContext.getSharedPreferences("conversation-previews", Context.MODE_PRIVATE)
+
+    fun preview(id: String): String? = previews.getString(id, null)
 
     suspend fun create(settings: ProviderSettings): ChatSessionSnapshot =
         withContext(Dispatchers.IO) {
@@ -118,6 +122,17 @@ class ChatSessionRepository(context: Context) {
         messages: List<ChatMessage>,
         providerLedger: List<ProviderMessage>,
         toolActivities: List<ToolActivity>,
+    ): ChatSessionSummary = saveLocked(id, settings, messages, providerLedger, toolActivities).also {
+        // A prisma's private chat keeps its summary fresh (cheap check; the work runs in background).
+        runCatching { PrivateMemoryKeeper.onChatSaved(appContext, id, messages) }
+    }
+
+    private suspend fun saveLocked(
+        id: String,
+        settings: ProviderSettings,
+        messages: List<ChatMessage>,
+        providerLedger: List<ProviderMessage>,
+        toolActivities: List<ToolActivity>,
     ): ChatSessionSummary = withContext(Dispatchers.IO) {
         mutex.withLock {
             ensureMigratedLocked()
@@ -154,6 +169,10 @@ class ChatSessionRepository(context: Context) {
                 deletedAtMillis = existing?.summary?.deletedAtMillis,
                 workspaceId = existing?.summary?.workspaceId ?: "default",
             )
+            normalizedMessages.lastOrNull { it.text.isNotBlank() }?.let { last ->
+                val text = last.text.replace(Regex("\\s+"), " ").trim().take(PREVIEW_MAX_CHARS)
+                previews.edit().putString(id, if (last.role == ChatRole.USER) "Você: $text" else text).apply()
+            }
             writeLocked(
                 ChatSessionSnapshot(
                     summary = summary,
@@ -374,6 +393,8 @@ class ChatSessionRepository(context: Context) {
         .putNullable("error", message.error)
         .put("reasoning", message.reasoning)
         .put("created_at", message.createdAtMillis)
+        .put("thinking_ms", message.thinkingMillis)
+        .put("thinking_trail", JSONArray(message.thinkingTrail))
 
     private fun decodeMessage(value: JSONObject): ChatMessage = normalizeMessage(
         ChatMessage(
@@ -389,6 +410,10 @@ class ChatSessionRepository(context: Context) {
             // Ausente em sessões salvas antes deste campo existir; optString já cai para "".
             reasoning = value.optString("reasoning"),
             createdAtMillis = value.optLong("created_at", 0L),
+            thinkingMillis = value.optLong("thinking_ms", 0L),
+            thinkingTrail = value.optJSONArray("thinking_trail")
+                ?.let { trail -> (0 until trail.length()).map(trail::optString).filter(String::isNotBlank) }
+                .orEmpty(),
         ),
     )
 
@@ -601,6 +626,7 @@ class ChatSessionRepository(context: Context) {
         const val FORMAT_VERSION = 1
         const val SESSION_SUFFIX = ".json"
         const val TITLE_MAX_CHARS = 56
+        const val PREVIEW_MAX_CHARS = 120
         const val KEY_ROOM_MIGRATED = "room_migrated_v1"
         // The visible transcript is intentionally retained even after the
         // provider ledger is compacted. Keep a corruption/OOM guard, but make

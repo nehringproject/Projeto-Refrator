@@ -221,16 +221,31 @@ cmd_login() {
   is_installed || { note "$DISTRO_NAME ainda não está instalado."; cmd_install; }
   require_proot
   prepare_rootfs
+  # A Prisma's own computer: same Ubuntu for everyone, but its own /root, /tmp and /workspace
+  # (REFRATOR_AGENT_*), plus the teams' folders at /times. Without them it is the user's shell.
+  local shm="$root/tmp" workspace="${REFRATOR_WORKSPACE:-}"
+  if [ -n "${REFRATOR_AGENT_HOME:-}" ]; then
+    mkdir -p "$REFRATOR_AGENT_HOME" "${REFRATOR_AGENT_TMP:?}" "${REFRATOR_AGENT_WORK:?}"
+    chmod 1777 "$REFRATOR_AGENT_TMP" 2>/dev/null || true
+    # A fresh home gets Ubuntu's default dotfiles once.
+    [ -e "$REFRATOR_AGENT_HOME/.profile" ] || cp -a "$root/etc/skel/." "$REFRATOR_AGENT_HOME/" 2>/dev/null || true
+    shm="$REFRATOR_AGENT_TMP"
+    workspace="$REFRATOR_AGENT_WORK"
+  fi
   local args=(
     --kill-on-exit --link2symlink --root-id --sysvipc
     --rootfs="$root" --cwd=/root
     -b /dev -b /dev/urandom:/dev/random -b /proc -b /sys
     -b /proc/self/fd:/dev/fd -b /proc/self/fd/0:/dev/stdin -b /proc/self/fd/1:/dev/stdout -b /proc/self/fd/2:/dev/stderr
-    -b "$root/tmp:/dev/shm"
+    -b "$shm:/dev/shm"
   )
+  if [ -n "${REFRATOR_AGENT_HOME:-}" ]; then
+    args+=(-b "$REFRATOR_AGENT_HOME:/root" -b "$REFRATOR_AGENT_TMP:/tmp")
+    [ -n "${REFRATOR_AGENT_TEAMS:-}" ] && mkdir -p "$REFRATOR_AGENT_TEAMS" && args+=(-b "$REFRATOR_AGENT_TEAMS:/times")
+  fi
   local path
   for path in /system /apex /vendor /linkerconfig/ld.config.txt; do [ -e "$path" ] && args+=(-b "$path"); done
-  [ -n "${REFRATOR_WORKSPACE:-}" ] && [ -d "$REFRATOR_WORKSPACE" ] && args+=(-b "$REFRATOR_WORKSPACE:/workspace")
+  [ -n "$workspace" ] && [ -d "$workspace" ] && args+=(-b "$workspace:/workspace")
   [ -r /storage/emulated/0 ] && args+=(-b /storage -b /storage/emulated/0:/sdcard)
   local fake
   while IFS= read -r fake; do [ -n "$fake" ] && args+=("$fake"); done < <(fake_proc_binds)

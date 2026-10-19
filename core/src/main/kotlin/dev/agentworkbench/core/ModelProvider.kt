@@ -69,6 +69,11 @@ sealed interface ProviderEvent {
      * adapter. This avoids lossy conversion of response IDs and cache handles.
      */
     data class Continuation(val values: Map<String, String>) : ProviderEvent
+    /**
+     * Usage-limit headers reported by the provider (e.g. x-codex-*, x-ratelimit-*,
+     * anthropic-ratelimit-*), lower-cased. Informational only; never sent back.
+     */
+    data class RateLimits(val headers: Map<String, String>) : ProviderEvent
     data class Completed(val finishReason: String) : ProviderEvent
     data class Cancelled(val reason: String = "Cancelled by user") : ProviderEvent
     data class Failed(val retryable: Boolean, val safeMessage: String) : ProviderEvent

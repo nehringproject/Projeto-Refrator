@@ -26,6 +26,10 @@ data class ChatMessage(
     val reasoning: String = "",
     /** Quando a mensagem foi criada; 0 em sessões salvas antes deste campo existir. */
     val createdAtMillis: Long = 0L,
+    /** Tempo entre o início da resposta e o primeiro texto ("Pensou por Xs"); 0 = desconhecido. */
+    val thinkingMillis: Long = 0L,
+    /** Etapas vistas enquanto o modelo pensava (ferramentas, status), para rever depois. */
+    val thinkingTrail: List<String> = emptyList(),
 )
 
 data class ChatUsage(
@@ -110,6 +114,8 @@ object ChatReducer {
                 state.updateAssistant { message ->
                     message.copy(reasoning = message.reasoning + event.value)
                 }
+
+            is ProviderEvent.RateLimits -> state
 
             is ProviderEvent.Usage ->
                 state.copy(

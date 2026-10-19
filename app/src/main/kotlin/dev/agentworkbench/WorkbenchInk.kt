@@ -17,11 +17,11 @@ import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
-/** Very dark reds for the "ink in water" motif; deliberately far below the bright accent. */
+/** Indigo → violet → pink ink for the "ink in water" motif. */
 internal object InkTokens {
-    val Deep = Color(0xFF3D070B)
-    val Mid = Color(0xFF6B0F16)
-    val Glint = Color(0xFF9E1B24)
+    val Deep = Color(0xFF241552)
+    val Mid = Color(0xFF4C2BB5)
+    val Glint = Color(0xFFFF4F86)
 }
 
 /**

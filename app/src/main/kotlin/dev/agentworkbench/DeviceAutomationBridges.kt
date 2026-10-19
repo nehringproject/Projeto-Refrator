@@ -3,6 +3,8 @@ package dev.agentworkbench
 interface AccessibilityAutomationBridge {
     fun status(): String
     fun snapshot(maxNodes: Int): String
+    /** The active screen as compact text (one line per text or control), far cheaper than [snapshot]. */
+    fun screenText(maxLines: Int, withBounds: Boolean): String = snapshot(maxLines)
     fun snapshotDisplay(displayId: Int, maxNodes: Int): String
     fun setFocusedText(displayId: Int, text: String): String
     fun nodeAction(nodeId: String, action: String, text: String?): String

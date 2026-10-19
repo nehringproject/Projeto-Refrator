@@ -16,21 +16,21 @@ import androidx.compose.ui.unit.sp
 /** Semantic colors used throughout the Refrator interface. */
 internal object WorkbenchTokens {
     // Near-black surfaces stepped by lightness only, with one red accent (Refrator identity).
-    val Canvas = Color(0xFF070707)
-    val Navigation = Color(0xFF0B0B0B)
-    val Surface = Color(0xFF101010)
-    val SurfaceRaised = Color(0xFF151515)
-    val SurfaceHigh = Color(0xFF1D1D1D)
-    val Border = Color(0xFF262626)
-    val BorderSoft = Color(0xFF1B1B1B)
+    val Canvas = Color(0xFF000000)
+    val Navigation = Color(0xFF050507)
+    val Surface = Color(0xFF0C0D12)
+    val SurfaceRaised = Color(0xFF111219)
+    val SurfaceHigh = Color(0xFF191A23)
+    val Border = Color(0xFF22232E)
+    val BorderSoft = Color(0xFF15161E)
 
-    // The single accent: primary action, focus, selection and the brand mark.
-    val Gold = Color(0xFFE5383B)
-    val GoldSoft = Color(0xFF2B1214)
+    // Main accent (violet); mascots and tabs bring the other colours.
+    val Gold = Color(0xFF8B7CFF)
+    val GoldSoft = Color(0xFF1E1A3A)
 
     // The user's own messages: neutral, the accent is reserved for a few small details.
-    val UserBubble = Color(0xFF1A1A1A)
-    val UserBubbleBorder = Color(0xFF242424)
+    val UserBubble = Color(0xFF2A0C14)
+    val UserBubbleBorder = Color(0xFF4A1624)
 
     // Identity accent, kept muted so it never competes with the primary action.
     val Coral = Color(0xFFC9A39A)
@@ -51,6 +51,12 @@ internal object WorkbenchTokens {
     // Neutral information and reasoning state.
     val Sky = Color(0xFF8AB4D8)
     val SkySoft = Color(0xFF1B2733)
+
+    // Section colours for the bottom bar and the chat filters (Conversas, Arquivadas, Lixeira...).
+    val Blue = Color(0xFF2F7BFF)
+    val Amber = Color(0xFFF2A33A)
+    val Pink = Color(0xFFFF4F86)
+    val Teal = Color(0xFF2DD4BF)
 
     val Text = Color(0xFFF2F2F2)
     val TextMuted = Color(0xFF9A9A9A)

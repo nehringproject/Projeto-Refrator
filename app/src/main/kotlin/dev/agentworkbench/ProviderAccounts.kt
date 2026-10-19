@@ -121,7 +121,8 @@ internal fun ProviderAccountsSheet(
         ) {
             Text("Modelo e contas", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
             Text(
-                text = "Ativo: ${settings.preset.displayName} · ${settings.modelId}",
+                text = "Ativo: ${settings.preset.displayName} · ${settings.modelId}\n" +
+                    settings.preset.capabilities.summary(),
                 style = MaterialTheme.typography.labelMedium,
                 color = WorkbenchTokens.TextMuted,
             )
@@ -185,8 +186,19 @@ internal fun ProviderAccountsSheet(
             }
 
             KeyAccountCard(
+                title = "OpenCode Go",
+                subtitle = "Assinatura do OpenCode (GPT Luna, GLM, Grok…). Assine, copie a chave do Go e cole aqui.",
+                loginLabel = "Abrir o OpenCode Go",
+                loginUrl = "https://opencode.ai/go",
+                connected = repository.hasApiKey(repository.defaults(ProviderPreset.OPENCODE_GO)),
+                active = settings.preset == ProviderPreset.OPENCODE_GO,
+                onOpen = ::open,
+                onConnect = { key -> activate(ProviderPreset.OPENCODE_GO, apiKey = key) },
+            )
+
+            KeyAccountCard(
                 title = "OpenCode Zen",
-                subtitle = "Entre no opencode.ai (Google ou GitHub), gere uma chave e cole aqui.",
+                subtitle = "Pague só o que usar (tem modelos grátis). Entre no opencode.ai, gere uma chave e cole aqui.",
                 loginLabel = "Entrar no OpenCode Zen",
                 loginUrl = OPENCODE_ZEN_LOGIN_URL,
                 connected = repository.hasApiKey(repository.defaults(ProviderPreset.OPENCODE_ZEN)),

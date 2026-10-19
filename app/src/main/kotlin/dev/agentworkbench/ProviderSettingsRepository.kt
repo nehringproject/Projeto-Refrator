@@ -23,6 +23,9 @@ import android.net.Uri
 
 const val MANAGED_LITELLM_ENDPOINT = "managed://litellm"
 
+/** Fake chat endpoint whose /models sibling is the OpenCode Go catalog. */
+private const val OPENCODE_GO_CATALOG_BASE = "https://opencode.ai/inference/go/v1/chat/completions"
+
 enum class ProviderPreset(
     val displayName: String,
     val description: String,
@@ -99,7 +102,15 @@ enum class ProviderPreset(
         displayName = "OpenCode Zen",
         description = "Modelos selecionados para agentes de codigo, com opções gratuitas e pagas.",
         defaultEndpoint = "https://opencode.ai/zen/v1/chat/completions",
-        defaultModel = "deepseek-v4-flash-free",
+        defaultModel = "deepseek-v4.1-flash-free",
+        protocol = HttpProviderProtocol.OPENAI_COMPATIBLE_CHAT,
+        requiresApiKey = true,
+    ),
+    OPENCODE_GO(
+        displayName = "OpenCode Go",
+        description = "Assinatura do OpenCode com uso incluído (GPT Luna, GLM, Grok, DeepSeek…). Chave própria do Go.",
+        defaultEndpoint = "https://opencode.ai/inference/go/openai/v1/chat/completions",
+        defaultModel = "deepseek-v4-pro",
         protocol = HttpProviderProtocol.OPENAI_COMPATIBLE_CHAT,
         requiresApiKey = true,
     ),
@@ -470,7 +481,11 @@ class ProviderSettingsRepository(
             localGguf.current()?.let { LocalGgufRuntimePlanner.forDevice(appContext, it).contextTokens }
                 ?: 2_048
         } else {
+            // A window the user set explicitly wins; otherwise use this provider's typical one.
             settings.continuousChat.contextWindowTokens
+                .takeIf { it != ContinuousChatSettings().contextWindowTokens }
+                ?: settings.preset.capabilities.contextWindowTokens
+                ?: settings.continuousChat.contextWindowTokens
         }
 
     suspend fun importLocalGguf(uri: Uri): LocalGgufInfo = localGguf.import(uri)
@@ -523,6 +538,48 @@ class ProviderSettingsRepository(
             }
         }
     }
+
+    /**
+     * The settings [bot] talks with: its own provider/model when it has one, otherwise the app's
+     * [active] settings. Execution mode, reasoning and continuous-chat options always follow the
+     * app, so permissions stay the same whichever model a prisma uses.
+     */
+    fun settingsForPrisma(bot: Bot?, active: ProviderSettings): ProviderSettings {
+        val preset = bot?.providerPreset?.let { name -> runCatching { ProviderPreset.valueOf(name) }.getOrNull() }
+        val base = if (preset == null || preset == active.preset) active else settingsForPreset(preset, active)
+        // A prisma with its own provider but no model saved uses that provider's fixed default,
+        // never whatever model the app happens to be on (that made it follow the central around).
+        val model = bot?.modelId?.trim()?.takeIf(String::isNotBlank)
+            ?: preset?.defaultModel
+            ?: return base
+        return base.copy(modelId = normalizedProviderModel(base.preset, model))
+    }
+
+    /** The model the app uses today for [preset]: what the picker pins when a provider is chosen. */
+    fun currentModelFor(preset: ProviderPreset, active: ProviderSettings): String =
+        if (preset == active.preset) active.modelId else settingsForPreset(preset, active).modelId
+
+    /**
+     * Routes for a prisma's turn. A prisma with its own provider talks only through it: no silent
+     * switch to the app's other providers (the continuity pool), so its brain is what the user picked.
+     */
+    fun routesForPrisma(bot: Bot?, settings: ProviderSettings, allowLocalCleartext: Boolean): List<ProviderRoute> {
+        val routes = buildProviderRoutes(settings, allowLocalCleartext)
+        return if (bot?.providerPreset.isNullOrBlank()) routes else routes.filter { it.settings.preset == settings.preset }
+    }
+
+    /** Why a prisma's own provider cannot run right now (for a clear message instead of a swap). */
+    fun prismaRouteProblem(settings: ProviderSettings, allowLocalCleartext: Boolean): String =
+        when (val result = buildProvider(settings, allowLocalCleartext)) {
+            is ProviderBuildResult.Rejected -> "${settings.preset.displayName}: ${result.reason}"
+            is ProviderBuildResult.Ready -> "${settings.preset.displayName} indisponível agora."
+        }
+
+    /** Providers the user has set up (key, login or saved profile): the choices for a prisma's model. */
+    fun configuredPresets(active: ProviderSettings, allowLocalCleartext: Boolean): List<ProviderPreset> =
+        ProviderPreset.entries.filter { preset ->
+            preset != ProviderPreset.DEMO && runCatching { isContinuityProviderReady(preset, active, allowLocalCleartext) }.getOrDefault(false)
+        }
 
     fun isContinuityProviderReady(
         preset: ProviderPreset,
@@ -604,8 +661,10 @@ class ProviderSettingsRepository(
         validate(settings, token, allowLocalCleartext)?.let {
             return ProviderBuildResult.Rejected(it)
         }
-        val protocol = settings.preset.protocol
-            ?: return ProviderBuildResult.Rejected("Provider protocol is unavailable")
+        val (protocol, routedEndpoint) = openCodeRoute(
+            settings,
+            settings.preset.protocol ?: return ProviderBuildResult.Rejected("Provider protocol is unavailable"),
+        )
         val locality = EndpointPolicy.inferLocality(settings.endpoint)
             ?: return ProviderBuildResult.Rejected("Endpoint locality could not be determined")
         val providerId = buildString {
@@ -620,7 +679,7 @@ class ProviderSettingsRepository(
                     providerId = providerId,
                     displayName = settings.preset.displayName,
                     protocol = protocol,
-                    endpoint = settings.endpoint.trim(),
+                    endpoint = routedEndpoint,
                     modelId = settings.modelId.trim(),
                     locality = locality,
                     authorizationToken = token,
@@ -692,7 +751,7 @@ class ProviderSettingsRepository(
                 providerId = "catalog-${settings.preset.name.lowercase()}",
                 displayName = settings.preset.displayName,
                 protocol = protocol,
-                endpoint = settings.endpoint.trim(),
+                endpoint = if (settings.preset == ProviderPreset.OPENCODE_GO) OPENCODE_GO_CATALOG_BASE else settings.endpoint.trim(),
                 modelId = settings.modelId.trim(),
                 locality = locality,
                 authorizationToken = token,
@@ -766,6 +825,65 @@ class ProviderSettingsRepository(
 
     private fun secret(settings: ProviderSettings): String? =
         secrets.get(secretSlot(settings))
+
+    /** OpenCode serves GPT models (e.g. gpt-6-luna) only on /responses; the rest on /chat/completions. */
+    private fun openCodeRoute(settings: ProviderSettings, protocol: HttpProviderProtocol): Pair<HttpProviderProtocol, String> {
+        val endpoint = settings.endpoint.trim()
+        val openCode = settings.preset == ProviderPreset.OPENCODE_ZEN || settings.preset == ProviderPreset.OPENCODE_GO
+        return if (openCode && settings.modelId.trim().startsWith("gpt-") && endpoint.endsWith("/chat/completions")) {
+            HttpProviderProtocol.OPENAI_RESPONSES to endpoint.removeSuffix("/chat/completions") + "/responses"
+        } else {
+            protocol to endpoint
+        }
+    }
+
+    /**
+     * The remaining balance of the account behind [settings], as readable text ("US$ 3,20
+     * restantes de US$ 10,00"), for providers that expose it (OpenRouter, DeepSeek). Blocking:
+     * call off the main thread. The key is only sent to the provider's own host and never returned.
+     */
+    fun accountBalance(settings: ProviderSettings): String? {
+        val key = secret(settings)?.takeIf(String::isNotBlank) ?: return null
+        fun getJson(url: String): org.json.JSONObject? {
+            val connection = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 6_000
+                readTimeout = 6_000
+                setRequestProperty("Authorization", "Bearer $key")
+                setRequestProperty("Accept", "application/json")
+            }
+            return try {
+                if (connection.responseCode !in 200..299) null
+                else org.json.JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+            } finally {
+                connection.disconnect()
+            }
+        }
+        fun money(value: Double, currency: String = "US$") = currency + " " + "%.2f".format(java.util.Locale("pt", "BR"), value)
+        return when (settings.preset) {
+            ProviderPreset.OPENROUTER -> {
+                val data = getJson("https://openrouter.ai/api/v1/key")?.optJSONObject("data")
+                val limit = data?.takeIf { !it.isNull("limit") }?.optDouble("limit")
+                val remaining = data?.takeIf { !it.isNull("limit_remaining") }?.optDouble("limit_remaining")
+                if (limit != null && remaining != null) {
+                    "${money(remaining)} restantes de ${money(limit)} (limite da chave)"
+                } else {
+                    getJson("https://openrouter.ai/api/v1/credits")?.optJSONObject("data")?.let { credits ->
+                        val total = credits.optDouble("total_credits")
+                        val used = credits.optDouble("total_usage")
+                        "${money(total - used)} restantes de ${money(total)} em créditos"
+                    }
+                }
+            }
+            ProviderPreset.DEEPSEEK -> {
+                val info = getJson("https://api.deepseek.com/user/balance")?.optJSONArray("balance_infos")?.optJSONObject(0)
+                info?.let {
+                    val currency = if (it.optString("currency") == "CNY") "¥" else "US$"
+                    "${money(it.optString("total_balance").toDoubleOrNull() ?: 0.0, currency)} de saldo"
+                }
+            }
+            else -> null
+        }
+    }
 
     fun managedLiteLlmDeployments(
         active: ProviderSettings,
@@ -1059,6 +1177,7 @@ class ProviderSettingsRepository(
         ProviderPreset.OLLAMA -> "openai/$model"
         ProviderPreset.KENARI,
         ProviderPreset.OPENCODE_ZEN,
+        ProviderPreset.OPENCODE_GO,
         ProviderPreset.CUSTOM_OPENAI,
         -> "openai/$model"
         ProviderPreset.DEMO,
@@ -1090,6 +1209,7 @@ class ProviderSettingsRepository(
     )
 
     private fun normalizedProviderModel(preset: ProviderPreset, model: String): String = when {
+        preset == ProviderPreset.OPENCODE_ZEN && model.trim() == "deepseek-v4-flash-free" -> "deepseek-v4.1-flash-free"
         preset == ProviderPreset.OPENROUTER &&
             model.trim() == "deepseek/deepseek-v4-flash-0731" ->
             "deepseek/deepseek-v4-pro:exacto"

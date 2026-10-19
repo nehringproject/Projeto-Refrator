@@ -1,0 +1,700 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "id": "whatsapp",
+      "name": "WhatsApp",
+      "emoji": "💬",
+      "category": "Mensagens",
+      "kind": "android_native",
+      "description": "Abre uma conversa no WhatsApp com a mensagem já preenchida. Você revisa e envia, e também pode compartilhar conteúdo pelo app.",
+      "capabilities": [
+        "Abrir conversa com um número ou contato",
+        "Preencher a mensagem antes do envio",
+        "Você confirma o envio",
+        "Compartilhar texto pelo WhatsApp"
+      ],
+      "auth": "none",
+      "docs": "https://faq.whatsapp.com/",
+      "status": "pronto",
+      "prisma_hint": "Use whatsapp_send quando o usuário pedir para mandar mensagem pelo WhatsApp, passando o número ou contato e o texto. O app abre a conversa com o texto pronto, e o envio fica sempre com o usuário.",
+      "tools": ["whatsapp_send"]
+    },
+    {
+      "id": "calendar",
+      "name": "Calendário do celular",
+      "emoji": "📅",
+      "category": "Agenda e tarefas",
+      "kind": "android_native",
+      "description": "Lê os próximos compromissos da agenda do celular e cria novos eventos. Ajuda a organizar o dia sem abrir o app de calendário.",
+      "capabilities": [
+        "Listar próximos eventos",
+        "Criar eventos com título, data e hora",
+        "Usa a agenda instalada no celular"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/reference/android/provider/CalendarContract",
+      "status": "pronto",
+      "prisma_hint": "Use calendar_list para consultar compromissos futuros antes de sugerir horários ou marcar algo novo. Use calendar_add para criar um evento somente depois que o usuário confirmar título, data e hora.",
+      "tools": ["calendar_list", "calendar_add"]
+    },
+    {
+      "id": "alarms",
+      "name": "Alarmes e timers",
+      "emoji": "⏰",
+      "category": "Agenda e tarefas",
+      "kind": "android_native",
+      "description": "Cria alarmes e timers no app Relógio do celular. Serve para lembretes de horário e contagens regressivas.",
+      "capabilities": [
+        "Criar alarme em horário específico",
+        "Iniciar timer com duração",
+        "Usa o app Relógio do sistema"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/reference/android/provider/AlarmClock",
+      "status": "pronto",
+      "prisma_hint": "Use alarm_set para lembretes de horário e timer_set para contagens curtas, como tempo de cozinhar ou uma pausa. Confirme a hora ou a duração com o usuário quando estiverem ambíguas.",
+      "tools": ["alarm_set", "timer_set"]
+    },
+    {
+      "id": "settings",
+      "name": "Configurações do sistema",
+      "emoji": "🔧",
+      "category": "Celular",
+      "kind": "android_native",
+      "description": "Abre painéis de configurações do celular, como Wi-Fi, Bluetooth, bateria e notificações. O ajuste final é feito pelo próprio usuário.",
+      "capabilities": [
+        "Abrir Wi-Fi e Bluetooth",
+        "Abrir bateria, notificações e apps",
+        "Abrir localização, tela, som e economia de dados"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/reference/android/provider/Settings",
+      "status": "pronto",
+      "prisma_hint": "Use settings_open quando o usuário quiser mexer em uma configuração do sistema, indicando o painel certo. O app só abre a tela, então explique o que o usuário precisa mudar lá.",
+      "tools": ["settings_open"]
+    },
+    {
+      "id": "notices",
+      "name": "Avisos da Refrator",
+      "emoji": "🔔",
+      "category": "Celular",
+      "kind": "android_native",
+      "description": "Permite que o Prisma envie avisos e comunicados como notificações no celular. Útil para decisões, prazos e alertas importantes de grupos.",
+      "capabilities": [
+        "Enviar notificações com título e texto",
+        "Avisar sobre comunicados e decisões",
+        "Aparece na barra de notificações"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/develop/ui/views/notifications",
+      "status": "pronto",
+      "prisma_hint": "Use notify_user para avisar o usuário sobre algo importante que aconteceu enquanto ele não está no app, como uma decisão de grupo ou um prazo. Seja breve e evite avisos repetidos sem necessidade.",
+      "tools": ["notify_user"]
+    },
+    {
+      "id": "browser-account",
+      "name": "Navegador com minhas contas",
+      "emoji": "🌐",
+      "category": "Pesquisa",
+      "kind": "android_native",
+      "description": "Navega na web dentro do navegador do Refrator usando as sessões que você já logou. Você faz login uma vez e o Prisma usa essas contas para buscar e preencher informações.",
+      "capabilities": [
+        "Abrir páginas no navegador do Refrator",
+        "Ler o conteúdo da página",
+        "Clicar em botões e preencher campos",
+        "Usa sessões que você já logou"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/reference/android/webkit/WebView",
+      "status": "pronto",
+      "prisma_hint": "Use browser_open para abrir o site, browser_snapshot para ler o que está na tela e browser_click ou browser_type para interagir. Não preencha senhas nem dados sensíveis sem pedir confirmação, e mostre o resultado antes de ações que alterem uma conta.",
+      "tools": ["browser_open", "browser_snapshot", "browser_click", "browser_type"]
+    },
+    {
+      "id": "screen-reader",
+      "name": "Leitura e toque na tela",
+      "emoji": "🔍",
+      "category": "Celular",
+      "kind": "android_native",
+      "description": "Lê o texto da tela atual do celular e pode tocar em elementos para você. Precisa da Acessibilidade ativada e é um recurso da build de desenvolvimento.",
+      "capabilities": [
+        "Ler o texto da tela atual",
+        "Tocar em botões e itens da tela",
+        "Exige ativar a Acessibilidade",
+        "Disponível na build Dev"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/reference/android/accessibilityservice/AccessibilityService",
+      "status": "pronto",
+      "prisma_hint": "Use accessibility_screen_text para entender o que está na tela antes de agir, e accessibility_action só quando o usuário pedir um toque específico. Confirme com o usuário antes de qualquer ação que envie, pague ou apague algo.",
+      "tools": ["accessibility_screen_text", "accessibility_action"]
+    },
+    {
+      "id": "maps",
+      "name": "Mapas",
+      "emoji": "📍",
+      "category": "Celular",
+      "kind": "android_native",
+      "description": "Abre rotas e buscas de lugares no app de mapas do celular. Você escolhe o caminho e inicia a navegação.",
+      "capabilities": [
+        "Abrir rota até um endereço",
+        "Buscar lugares e endereços",
+        "Usa o app de mapas instalado"
+      ],
+      "auth": "none",
+      "docs": "https://developers.google.com/maps/documentation/urls/android-intents",
+      "status": "pronto",
+      "prisma_hint": "Use maps_open quando o usuário quiser ir a algum lugar ou buscar um endereço. Passe o destino em texto claro, e se houver mais de um lugar possível, pergunte antes.",
+      "tools": ["maps_open"]
+    },
+    {
+      "id": "sms",
+      "name": "SMS",
+      "emoji": "📩",
+      "category": "Mensagens",
+      "kind": "android_native",
+      "description": "Prepara uma mensagem SMS com número e texto no app de mensagens. Você revisa e envia.",
+      "capabilities": [
+        "Preparar SMS para um número",
+        "Texto já preenchido",
+        "Você confirma o envio"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/reference/android/provider/Telephony",
+      "status": "pronto",
+      "prisma_hint": "Use sms_draft quando o usuário pedir para mandar um SMS. O app de mensagens abre com o texto pronto, e o envio fica sempre com o usuário.",
+      "tools": ["sms_draft"]
+    },
+    {
+      "id": "phone",
+      "name": "Telefone",
+      "emoji": "📞",
+      "category": "Celular",
+      "kind": "android_native",
+      "description": "Abre o discador com o número informado. A ligação só começa quando você toca no botão.",
+      "capabilities": [
+        "Abrir o discador com um número",
+        "Você decide quando ligar"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/guide/components/intents-common",
+      "status": "pronto",
+      "prisma_hint": "Use phone_dial quando o usuário quiser ligar para alguém, passando o número. A chamada fica para o usuário iniciar.",
+      "tools": ["phone_dial"]
+    },
+    {
+      "id": "email",
+      "name": "E-mail",
+      "emoji": "📧",
+      "category": "Mensagens",
+      "kind": "android_native",
+      "description": "Abre o app de e-mail, como o Gmail, com destinatário, assunto e corpo já preenchidos. Você revisa antes de enviar.",
+      "capabilities": [
+        "Preencher destinatário, assunto e corpo",
+        "Abrir o app de e-mail instalado",
+        "Você confirma o envio"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/guide/components/intents-common",
+      "status": "pronto",
+      "prisma_hint": "Use email_compose quando o usuário quiser escrever um e-mail. Preencha os campos com o conteúdo aprovado e deixe o envio para o usuário.",
+      "tools": ["email_compose"]
+    },
+    {
+      "id": "apps",
+      "name": "Abrir apps",
+      "emoji": "📱",
+      "category": "Celular",
+      "kind": "android_native",
+      "description": "Abre um app instalado no celular pelo nome. Leva o usuário direto ao que ele precisa.",
+      "capabilities": [
+        "Abrir app pelo nome",
+        "Funciona com apps instalados no celular"
+      ],
+      "auth": "none",
+      "docs": "https://developer.android.com/reference/android/content/pm/PackageManager",
+      "status": "pronto",
+      "prisma_hint": "Use app_open quando o usuário pedir para abrir um app. Se o nome for ambíguo ou o app não estiver instalado, avise o usuário em vez de abrir outro no lugar.",
+      "tools": ["app_open"]
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "emoji": "📓",
+      "category": "Produtividade",
+      "kind": "mcp_remote",
+      "description": "Pesquisa, lê e edita páginas e bancos de dados do seu Notion. Use para organizar notas, projetos e documentos.",
+      "capabilities": [
+        "Buscar páginas e bancos",
+        "Ler o conteúdo das páginas",
+        "Criar e atualizar páginas",
+        "Comentar em páginas"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.notion.com/mcp",
+      "docs": "https://developers.notion.com/docs/get-started-with-mcp",
+      "status": "oficial",
+      "prisma_hint": "Use quando o usuário quiser encontrar, ler ou atualizar anotações e documentos no Notion. Busque primeiro para achar a página certa e só altere conteúdo depois de confirmar com o usuário."
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "emoji": "🐙",
+      "category": "Dev",
+      "kind": "mcp_remote",
+      "description": "Acessa repositórios, issues e pull requests do GitHub. Serve para acompanhar código e revisar mudanças.",
+      "capabilities": [
+        "Listar e buscar repositórios",
+        "Ver e criar issues",
+        "Ver e comentar pull requests",
+        "Ler arquivos do código"
+      ],
+      "auth": "oauth",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "docs": "https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar repositórios, issues e pull requests quando o usuário pedir informações sobre o código. Antes de criar uma issue ou comentário, mostre o texto ao usuário e aguarde confirmação."
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "emoji": "🎯",
+      "category": "Dev",
+      "kind": "mcp_remote",
+      "description": "Acessa issues, projetos e comentários do Linear. Útil para acompanhar o que está em andamento e criar tarefas de desenvolvimento.",
+      "capabilities": [
+        "Buscar e filtrar issues",
+        "Criar e atualizar issues",
+        "Ver projetos e comentários"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.linear.app/mcp",
+      "docs": "https://linear.app/docs/mcp",
+      "status": "oficial",
+      "prisma_hint": "Use quando o usuário perguntar sobre tarefas de desenvolvimento ou quiser criar e atualizar issues. Confirme o time e o título antes de criar algo novo."
+    },
+    {
+      "id": "stripe",
+      "name": "Stripe",
+      "emoji": "💳",
+      "category": "Dados e finanças",
+      "kind": "mcp_remote",
+      "description": "Consulta clientes, cobranças, faturas e assinaturas da sua conta Stripe. Reembolsos e transferências exigem aprovação extra.",
+      "capabilities": [
+        "Consultar clientes, pagamentos e faturas",
+        "Criar faturas e links de pagamento",
+        "Gerenciar assinaturas e cupons",
+        "Pede confirmação humana para reembolsos e transferências"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.stripe.com",
+      "docs": "https://docs.stripe.com/mcp",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar cobranças, faturas e assinaturas da conta Stripe. Nunca execute reembolso ou transferência sem aprovação explícita do usuário, e lembre que o Stripe pede confirmação humana nessas ações."
+    },
+    {
+      "id": "atlassian",
+      "name": "Atlassian (Jira e Confluence)",
+      "emoji": "🧱",
+      "category": "Produtividade",
+      "kind": "mcp_remote",
+      "description": "Acessa Jira e Confluence da sua conta Atlassian Cloud. Use para buscar tarefas, páginas e documentos da equipe.",
+      "capabilities": [
+        "Buscar issues e projetos no Jira",
+        "Ler e criar páginas no Confluence",
+        "Respeita as permissões de cada usuário",
+        "Somente Atlassian Cloud"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.atlassian.com/v2/mcp",
+      "docs": "https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+      "status": "oficial",
+      "prisma_hint": "Use quando o usuário perguntar sobre tarefas do Jira ou documentos do Confluence da equipe. Busque antes de criar ou alterar issues e páginas, e mostre o resultado antes de salvar mudanças."
+    },
+    {
+      "id": "sentry",
+      "name": "Sentry",
+      "emoji": "🚨",
+      "category": "Dev",
+      "kind": "mcp_remote",
+      "description": "Consulta erros, issues e eventos de monitoramento do Sentry. Ajuda a entender falhas em produção.",
+      "capabilities": [
+        "Buscar issues e erros",
+        "Ver detalhes de eventos",
+        "Escolher grupos de ferramentas na conexão"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.sentry.dev/mcp",
+      "docs": "https://mcp.sentry.dev/",
+      "status": "oficial",
+      "prisma_hint": "Use quando o usuário quiser saber por que algo está quebrando ou quais erros são mais frequentes. Resuma os erros encontrados e sugira causas, sem alterar nada no projeto sem confirmação."
+    },
+    {
+      "id": "google-gmail",
+      "name": "Gmail (Google Workspace)",
+      "emoji": "📬",
+      "category": "Mensagens",
+      "kind": "mcp_remote",
+      "description": "Busca, lê e cria rascunhos de e-mails do Gmail pelo servidor MCP oficial do Google. Está em Developer Preview, então exige inscrição no programa.",
+      "capabilities": [
+        "Buscar e ler e-mails",
+        "Criar rascunhos",
+        "Ver o perfil da conta",
+        "Exige inscrição no Developer Preview do Google Workspace"
+      ],
+      "auth": "oauth",
+      "url": "https://gmailmcp.googleapis.com/mcp/v1",
+      "docs": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+      "status": "oficial",
+      "prisma_hint": "Use para encontrar e resumir e-mails quando o usuário pedir. Para responder, prefira criar um rascunho e pedir confirmação antes de enviar qualquer mensagem."
+    },
+    {
+      "id": "google-calendar",
+      "name": "Google Agenda (Workspace)",
+      "emoji": "📆",
+      "category": "Agenda e tarefas",
+      "kind": "mcp_remote",
+      "description": "Consulta e gerencia eventos do Google Agenda pelo servidor MCP oficial do Google. Também está em Developer Preview e exige inscrição.",
+      "capabilities": [
+        "Ver horários livres",
+        "Listar e gerenciar eventos",
+        "Exige inscrição no Developer Preview do Google Workspace"
+      ],
+      "auth": "oauth",
+      "url": "https://calendarmcp.googleapis.com/mcp/v1",
+      "docs": "https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server",
+      "status": "oficial",
+      "prisma_hint": "Use para encontrar horários livres ou conferir compromissos no Google Agenda. Antes de criar ou alterar um evento, confirme data, hora e participantes com o usuário."
+    },
+    {
+      "id": "google-drive",
+      "name": "Google Drive (Workspace)",
+      "emoji": "📁",
+      "category": "Produtividade",
+      "kind": "mcp_remote",
+      "description": "Busca, lê e envia arquivos do Google Drive pelo servidor MCP oficial do Google. Está em Developer Preview e exige inscrição.",
+      "capabilities": [
+        "Buscar e listar arquivos",
+        "Ler o conteúdo dos arquivos",
+        "Enviar arquivos",
+        "Gerenciar permissões de compartilhamento",
+        "Exige inscrição no Developer Preview do Google Workspace"
+      ],
+      "auth": "oauth",
+      "url": "https://drivemcp.googleapis.com/mcp/v1",
+      "docs": "https://developers.google.com/workspace/drive/api/guides/configure-mcp-server",
+      "status": "oficial",
+      "prisma_hint": "Use para localizar e ler arquivos do Drive quando o usuário citar um documento. Não altere permissões de compartilhamento nem envie arquivos sem confirmação explícita."
+    },
+    {
+      "id": "asana",
+      "name": "Asana",
+      "emoji": "✅",
+      "category": "Agenda e tarefas",
+      "kind": "mcp_remote",
+      "description": "Acessa tarefas, projetos e comentários do Asana. Use para acompanhar o que a equipe precisa fazer.",
+      "capabilities": [
+        "Buscar tarefas e projetos",
+        "Criar e atualizar tarefas",
+        "Comentar em tarefas"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.asana.com/v2/mcp",
+      "docs": "https://developers.asana.com/docs/using-asanas-mcp-server",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar tarefas e prazos no Asana ou criar novas tarefas quando o usuário pedir. Confirme o projeto e o responsável antes de criar ou mudar algo."
+    },
+    {
+      "id": "hubspot",
+      "name": "HubSpot",
+      "emoji": "🤝",
+      "category": "Produtividade",
+      "kind": "mcp_remote",
+      "description": "Acessa contatos, empresas, negócios e atividades do CRM HubSpot. Use para acompanhar clientes e vendas.",
+      "capabilities": [
+        "Buscar contatos e empresas",
+        "Ver negócios e atividades",
+        "Atualizar registros do CRM"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.hubspot.com/",
+      "docs": "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/integrate-with-the-remote-hubspot-mcp-server",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar clientes e negócios no HubSpot quando o usuário pedir. Antes de atualizar um registro, mostre o que vai mudar e aguarde a confirmação."
+    },
+    {
+      "id": "square",
+      "name": "Square",
+      "emoji": "💰",
+      "category": "Dados e finanças",
+      "kind": "mcp_remote",
+      "description": "Consulta dados da sua conta Square pelo servidor MCP oficial da Square. Serve para acompanhar o movimento do negócio.",
+      "capabilities": [
+        "Consultar dados da conta Square",
+        "Permissões escolhidas na conexão OAuth"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.squareup.com/mcp",
+      "docs": "https://developer.squareup.com/docs/mcp",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar informações da conta Square quando o usuário pedir números ou status. Antes de qualquer alteração, confirme com o usuário."
+    },
+    {
+      "id": "vercel",
+      "name": "Vercel",
+      "emoji": "🚀",
+      "category": "Dev",
+      "kind": "mcp_remote",
+      "description": "Acessa projetos, deploys e logs da sua conta Vercel, além da documentação. Útil para acompanhar publicações e diagnosticar falhas.",
+      "capabilities": [
+        "Listar projetos e deploys",
+        "Analisar logs de deploy",
+        "Buscar na documentação da Vercel",
+        "Consultar métricas de acesso"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.vercel.com",
+      "docs": "https://vercel.com/docs/agent-resources/vercel-mcp",
+      "status": "oficial",
+      "prisma_hint": "Use para checar o status de deploys ou ler logs quando o usuário relatar uma falha em projeto Vercel. Não crie nem refaça deploys sem a confirmação do usuário."
+    },
+    {
+      "id": "supabase",
+      "name": "Supabase",
+      "emoji": "⚡",
+      "category": "Dev",
+      "kind": "mcp_remote",
+      "description": "Acessa projetos, tabelas e configurações do Supabase, que reúne banco de dados e autenticação. Útil para consultar e manter o backend.",
+      "capabilities": [
+        "Listar projetos e organizações",
+        "Consultar tabelas e configurações",
+        "Login por OAuth na organização"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.supabase.com/mcp",
+      "docs": "https://supabase.com/docs/guides/getting-started/mcp",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar o banco e a configuração de projetos Supabase durante o desenvolvimento. Não execute alterações de schema ou de dados sem confirmação do usuário, e prefira ambientes de teste."
+    },
+    {
+      "id": "neon",
+      "name": "Neon",
+      "emoji": "💡",
+      "category": "Dev",
+      "kind": "mcp_remote",
+      "description": "Gerencia projetos e bancos PostgreSQL serverless do Neon. Útil para criar bancos de teste e consultar dados.",
+      "capabilities": [
+        "Gerenciar projetos Neon",
+        "Consultar bancos PostgreSQL",
+        "Login por OAuth ou chave de API"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.neon.tech/mcp",
+      "docs": "https://neon.com/docs/ai/neon-mcp-server",
+      "status": "oficial",
+      "prisma_hint": "Use para inspecionar bancos Neon e conferir esquemas ou dados durante o desenvolvimento. Peça confirmação antes de qualquer alteração que possa afetar produção."
+    },
+    {
+      "id": "cloudflare",
+      "name": "Cloudflare",
+      "emoji": "🔒",
+      "category": "Dev",
+      "kind": "mcp_remote",
+      "description": "Acessa a API da Cloudflare para consultar e gerenciar domínios, DNS, Workers e outros serviços. Também pesquisa na documentação oficial.",
+      "capabilities": [
+        "Consultar a API completa da Cloudflare",
+        "Buscar na documentação da Cloudflare",
+        "Login por OAuth ou token de API"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.cloudflare.com/mcp",
+      "docs": "https://developers.cloudflare.com/agents/model-context-protocol/mcp-servers-for-cloudflare/",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar a configuração de DNS, Workers e outros recursos da Cloudflare, ou para pesquisar na documentação. Alterações em DNS ou regras de segurança só depois de confirmação explícita do usuário."
+    },
+    {
+      "id": "figma",
+      "name": "Figma",
+      "emoji": "🎨",
+      "category": "Criação",
+      "kind": "mcp_remote",
+      "description": "Lê arquivos, frames e componentes do Figma para entender um design ou gerar código a partir dele. Funciona sem o app desktop.",
+      "capabilities": [
+        "Ler frames e componentes do Figma",
+        "Gerar código a partir do design",
+        "Funciona sem o app desktop"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.figma.com/mcp",
+      "docs": "https://developers.figma.com/docs/figma-mcp-server/",
+      "status": "oficial",
+      "prisma_hint": "Use quando o usuário compartilhar um link do Figma e pedir para entender ou implementar o design. Leia o frame antes de sugerir mudanças e peça confirmação para alterar o arquivo."
+    },
+    {
+      "id": "box",
+      "name": "Box",
+      "emoji": "📦",
+      "category": "Produtividade",
+      "kind": "mcp_remote",
+      "description": "Acessa arquivos e pastas da sua conta Box, com busca e leitura de conteúdo. Use para encontrar documentos armazenados.",
+      "capabilities": [
+        "Buscar arquivos e pastas",
+        "Ler o conteúdo dos arquivos",
+        "Acesso por OAuth com a sua conta"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.box.com",
+      "docs": "https://developer.box.com/guides/box-mcp/",
+      "status": "oficial",
+      "prisma_hint": "Use para localizar e ler documentos no Box quando o usuário citar um arquivo. Não compartilhe nem mova arquivos sem confirmação do usuário."
+    },
+    {
+      "id": "airtable",
+      "name": "Airtable",
+      "emoji": "📊",
+      "category": "Dados e finanças",
+      "kind": "mcp_remote",
+      "description": "Acessa bases, tabelas e registros do Airtable para consultar e atualizar dados. Serve para organizar planilhas e bancos de dados simples.",
+      "capabilities": [
+        "Consultar bases e tabelas",
+        "Ler e atualizar registros",
+        "Ver e comentar registros",
+        "Escolher as bases na conexão"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.airtable.com/mcp",
+      "docs": "https://airtable.com/developers/agents/mcp/getting-started",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar registros do Airtable quando o usuário pedir dados de uma base. Antes de criar ou alterar registros, mostre o que será modificado e espere a confirmação."
+    },
+    {
+      "id": "monday",
+      "name": "monday.com",
+      "emoji": "📋",
+      "category": "Produtividade",
+      "kind": "mcp_remote",
+      "description": "Acessa quadros, itens e atualizações do monday.com, plataforma de gestão de trabalho. Útil para acompanhar projetos e tarefas da equipe.",
+      "capabilities": [
+        "Buscar quadros e itens",
+        "Criar e atualizar itens e colunas",
+        "Definir responsáveis e prazos",
+        "Postar atualizações"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.monday.com/mcp",
+      "docs": "https://developer.monday.com/api-reference/docs/mondaycom-mcp",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar quadros e itens do monday.com ou criar tarefas quando o usuário pedir. Confirme o quadro e o responsável antes de criar ou alterar itens."
+    },
+    {
+      "id": "context7",
+      "name": "Context7",
+      "emoji": "📚",
+      "category": "Dev",
+      "kind": "mcp_remote",
+      "description": "Busca documentação atualizada de bibliotecas e frameworks para o Prisma responder com precisão. Funciona sem chave, com limite de uso menor.",
+      "capabilities": [
+        "Buscar bibliotecas pelo nome",
+        "Trazer trechos de documentação atualizados",
+        "Chave de API opcional para mais limite"
+      ],
+      "auth": "none",
+      "url": "https://mcp.context7.com/mcp",
+      "docs": "https://github.com/upstash/context7",
+      "status": "oficial",
+      "prisma_hint": "Use quando a resposta depender da versão atual de uma biblioteca ou framework. Consulte a documentação antes de escrever código que usa APIs específicas."
+    },
+    {
+      "id": "exa",
+      "name": "Exa (busca na web)",
+      "emoji": "🔎",
+      "category": "Pesquisa",
+      "kind": "mcp_remote",
+      "description": "Faz buscas na web e lê páginas pelo servidor MCP da Exa. Funciona sem chave, com limite de uso.",
+      "capabilities": [
+        "Busca semântica na web",
+        "Leitura de páginas",
+        "Chave de API opcional para mais limite"
+      ],
+      "auth": "none",
+      "url": "https://mcp.exa.ai/mcp",
+      "docs": "https://exa.ai/docs/reference/exa-mcp",
+      "status": "oficial",
+      "prisma_hint": "Use para pesquisar informações atuais na web quando o usuário pedir fontes ou novidades. Cite as fontes encontradas e diga quando não houver certeza."
+    },
+    {
+      "id": "intercom",
+      "name": "Intercom",
+      "emoji": "🎧",
+      "category": "Mensagens",
+      "kind": "mcp_remote",
+      "description": "Acessa conversas, contatos e artigos do Intercom, usado no atendimento ao cliente. Útil para resumir atendimentos e buscar respostas.",
+      "capabilities": [
+        "Buscar conversas e contatos",
+        "Consultar artigos de ajuda",
+        "Conexão por OAuth no workspace"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.intercom.com/mcp",
+      "docs": "https://developers.intercom.com/docs/guides/mcp",
+      "status": "oficial",
+      "prisma_hint": "Use para consultar conversas de clientes e artigos de ajuda quando o usuário pedir um resumo. Não responda clientes em nome do usuário sem confirmação."
+    },
+    {
+      "id": "canva",
+      "name": "Canva",
+      "emoji": "🪄",
+      "category": "Criação",
+      "kind": "mcp_remote",
+      "description": "Cria e edita designs no Canva, como apresentações e posts. Pode depender de liberação de acesso da Canva para novos clientes.",
+      "capabilities": [
+        "Buscar designs do usuário",
+        "Criar e editar designs",
+        "Requer conta Canva e permissão de acesso"
+      ],
+      "auth": "oauth",
+      "url": "https://mcp.canva.com/mcp",
+      "docs": "https://www.canva.dev/docs/apps/mcp/access/",
+      "status": "a confirmar",
+      "prisma_hint": "Use quando o usuário pedir uma arte ou apresentação no Canva. Mostre o que será criado antes de salvar e lembre que alguns recursos exigem plano Pro."
+    },
+    {
+      "id": "todoist",
+      "name": "Todoist",
+      "emoji": "📌",
+      "category": "Agenda e tarefas",
+      "kind": "mcp_remote",
+      "description": "Acessa tarefas, projetos e etiquetas do Todoist. Use para organizar a lista de afazeres do usuário.",
+      "capabilities": [
+        "Buscar e listar tarefas",
+        "Criar e atualizar tarefas",
+        "Ver projetos e etiquetas"
+      ],
+      "auth": "oauth",
+      "url": "https://ai.todoist.net/mcp",
+      "docs": "https://developer.todoist.com/",
+      "status": "a confirmar",
+      "prisma_hint": "Use para ver ou criar tarefas quando o usuário pedir ajuda para organizar o dia. Confirme o título e o prazo antes de criar, e não altere tarefas sem confirmação."
+    },
+    {
+      "id": "deepwiki",
+      "name": "DeepWiki",
+      "emoji": "🧠",
+      "category": "Dev",
+      "kind": "mcp_remote",
+      "description": "Gera documentação e responde perguntas sobre repositórios públicos do GitHub. Não exige conta nem chave.",
+      "capabilities": [
+        "Ler a estrutura da documentação de um repositório",
+        "Ler páginas da documentação",
+        "Fazer perguntas sobre o código",
+        "Somente repositórios públicos"
+      ],
+      "auth": "none",
+      "url": "https://mcp.deepwiki.com/mcp",
+      "docs": "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
+      "status": "oficial",
+      "prisma_hint": "Use para entender um repositório público do GitHub sem precisar clonar. A resposta reflete a última indexação, então avise quando o código pode ter mudado."
+    }
+  ]
+}

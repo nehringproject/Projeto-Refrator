@@ -163,7 +163,12 @@ class InternalRuntime(
                 error("Ja existe um processo com este ID.")
             }
             val pump = Thread({
-                process.inputStream.use { input -> copyBounded(input, output, process) }
+                // Terminating the process (timeout, truncation, cancel) closes the stream under
+                // this read; that is expected and must not crash the app.
+                try {
+                    process.inputStream.use { input -> copyBounded(input, output, process) }
+                } catch (_: java.io.IOException) {
+                }
             }, "runtime-output-${request.id.take(8)}").apply {
                 isDaemon = true
                 start()

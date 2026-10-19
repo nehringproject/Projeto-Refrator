@@ -1,12 +1,19 @@
 package dev.agentworkbench
 
+import android.content.ContentProviderClient
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import androidx.documentfile.provider.DocumentFile
+import android.os.ParcelFileDescriptor
+import android.os.RemoteException
+import android.provider.DocumentsContract
+import android.provider.DocumentsContract.Document
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 
 data class DocumentTreeStatus(
     val granted: Boolean,
@@ -16,6 +23,14 @@ data class DocumentTreeStatus(
     val canWrite: Boolean,
 )
 
+/**
+ * The external folder the user granted (SAF tree), often owned by another app such as Termux.
+ *
+ * Every query and stream goes through an *unstable* provider client: if the owner app dies
+ * mid-operation we get an error instead of Android killing Refrator along with it (a stable
+ * reference — what ContentResolver.query/openInputStream hold — makes the system kill clients
+ * of a dying provider, and with it every Prisma at work).
+ */
 class DocumentTreeAccess(context: Context) {
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
@@ -24,19 +39,31 @@ class DocumentTreeAccess(context: Context) {
         Context.MODE_PRIVATE,
     )
 
+    private data class Doc(
+        val uri: Uri,
+        val id: String,
+        val name: String,
+        val mime: String,
+        val size: Long,
+        val flags: Int,
+    ) {
+        val isDirectory: Boolean get() = mime == Document.MIME_TYPE_DIR
+    }
+
     fun status(): DocumentTreeStatus {
         val uri = storedUri()
         val permission = uri?.let { target ->
             resolver.persistedUriPermissions.firstOrNull { it.uri == target }
         }
-        val root = uri?.let { DocumentFile.fromTreeUri(appContext, it) }
-        val granted = permission != null && root?.exists() == true
+        val root = if (uri != null && permission != null) runCatching { rootDoc(uri) }.getOrNull() else null
+        val granted = permission != null && root != null
         return DocumentTreeStatus(
             granted = granted,
             displayName = root?.name,
             uri = uri?.toString(),
-            canRead = granted && permission.isReadPermission && root.canRead(),
-            canWrite = granted && permission.isWritePermission && root.canWrite(),
+            canRead = granted && permission.isReadPermission,
+            canWrite = granted && permission.isWritePermission &&
+                (root.flags and Document.FLAG_DIR_SUPPORTS_CREATE) != 0,
         )
     }
 
@@ -62,19 +89,19 @@ class DocumentTreeAccess(context: Context) {
     }
 
     fun list(path: String, depth: Int, maxEntries: Int = 250): List<String> {
-        val start = resolve(path, requireExists = true)
+        val tree = root(requireWrite = false)
+        val start = resolve(tree, path, requireExists = true)
         require(start.isDirectory) { "O caminho externo não é uma pasta." }
         val output = mutableListOf<String>()
-        fun visit(directory: DocumentFile, prefix: String, level: Int) {
+        fun visit(directory: Doc, prefix: String, level: Int) {
             if (output.size >= maxEntries) return
-            directory.listFiles()
-                .sortedWith(compareBy<DocumentFile>({ !it.isDirectory }, { it.name.orEmpty().lowercase() }))
+            children(tree, directory)
+                .sortedWith(compareBy<Doc>({ !it.isDirectory }, { it.name.lowercase() }))
                 .forEach { child ->
                     if (output.size >= maxEntries) return@forEach
-                    val name = child.name ?: "<sem-nome>"
-                    val relative = if (prefix.isEmpty()) name else "$prefix/$name"
+                    val relative = if (prefix.isEmpty()) child.name else "$prefix/${child.name}"
                     output += "${if (child.isDirectory) "d" else "f"} $relative" +
-                        if (child.isFile) " (${child.length()} B)" else ""
+                        if (!child.isDirectory && child.size >= 0) " (${child.size} B)" else ""
                     if (child.isDirectory && level < depth) visit(child, relative, level + 1)
                 }
         }
@@ -84,13 +111,13 @@ class DocumentTreeAccess(context: Context) {
     }
 
     fun read(path: String, maxBytes: Int): String {
-        val file = resolve(path, requireExists = true)
-        require(file.isFile) { "O caminho externo não é um arquivo." }
-        val declared = file.length()
-        require(declared < 0 || declared <= maxBytes) {
-            "Arquivo possui $declared bytes; limite solicitado é $maxBytes."
+        val tree = root(requireWrite = false)
+        val file = resolve(tree, path, requireExists = true)
+        require(!file.isDirectory) { "O caminho externo não é um arquivo." }
+        require(file.size < 0 || file.size <= maxBytes) {
+            "Arquivo possui ${file.size} bytes; limite solicitado é $maxBytes."
         }
-        return resolver.openInputStream(file.uri)?.buffered()?.use { input ->
+        return openInput(file.uri).buffered().use { input ->
             val output = ByteArrayOutputStream(minOf(maxBytes, 16_384))
             val buffer = ByteArray(4_096)
             while (output.size() <= maxBytes) {
@@ -100,31 +127,16 @@ class DocumentTreeAccess(context: Context) {
             }
             require(output.size() <= maxBytes) { "Arquivo excede $maxBytes bytes." }
             output.toByteArray().toString(Charsets.UTF_8)
-        } ?: throw FileNotFoundException("Não foi possível abrir o arquivo externo.")
+        }
     }
 
     fun write(path: String, content: String, overwrite: Boolean): DocumentTreeWriteResult {
         val segments = normalize(path)
         require(segments.isNotEmpty()) { "Informe um caminho de arquivo." }
-        val fileName = segments.last()
-        var parent = root(requireWrite = true)
-        segments.dropLast(1).forEach { segment ->
-            val existing = parent.findFile(segment)
-            parent = when {
-                existing == null -> parent.createDirectory(segment)
-                    ?: error("Não foi possível criar a pasta $segment.")
-                existing.isDirectory -> existing
-                else -> error("$segment existe e não é uma pasta.")
-            }
-        }
-        val existing = parent.findFile(fileName)
-        require(existing == null || overwrite) { "Arquivo externo já existe." }
-        require(existing == null || existing.isFile) { "O destino externo não é um arquivo." }
-        val target = existing ?: parent.createFile("text/plain", fileName)
-            ?: error("Não foi possível criar o arquivo externo.")
-        resolver.openOutputStream(target.uri, "wt")?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
-            writer.write(content)
-        } ?: throw FileNotFoundException("Não foi possível abrir o destino externo.")
+        val tree = root(requireWrite = true)
+        val parent = ensureDirectories(tree, segments.dropLast(1))
+        val target = fileTarget(tree, parent, segments.last(), "text/plain", overwrite)
+        openOutput(target.uri).bufferedWriter(Charsets.UTF_8).use { writer -> writer.write(content) }
         return DocumentTreeWriteResult(
             path = segments.joinToString("/"),
             bytes = content.toByteArray(Charsets.UTF_8).size,
@@ -141,31 +153,16 @@ class DocumentTreeAccess(context: Context) {
         require(source.isFile) { "Arquivo temporario de download nao existe." }
         val segments = normalize(path)
         require(segments.isNotEmpty()) { "Informe um caminho de arquivo." }
-        val fileName = segments.last()
-        var parent = root(requireWrite = true)
-        segments.dropLast(1).forEach { segment ->
-            val existing = parent.findFile(segment)
-            parent = when {
-                existing == null -> parent.createDirectory(segment)
-                    ?: error("Nao foi possivel criar a pasta $segment.")
-                existing.isDirectory -> existing
-                else -> error("$segment existe e nao e uma pasta.")
-            }
-        }
-        val existing = parent.findFile(fileName)
-        require(existing == null || overwrite) { "Arquivo externo ja existe." }
-        require(existing == null || existing.isFile) { "O destino externo nao e um arquivo." }
-        val created = existing == null
-        val target = existing ?: parent.createFile(
-            mimeType.ifBlank { "application/octet-stream" },
-            fileName,
-        ) ?: error("Nao foi possivel criar o arquivo externo.")
+        val tree = root(requireWrite = true)
+        val parent = ensureDirectories(tree, segments.dropLast(1))
+        val created = children(tree, parent).none { it.name == segments.last() }
+        val target = fileTarget(tree, parent, segments.last(), mimeType.ifBlank { "application/octet-stream" }, overwrite)
         try {
-            resolver.openOutputStream(target.uri, "wt")?.buffered()?.use { output ->
+            openOutput(target.uri).buffered().use { output ->
                 source.inputStream().buffered().use { input -> input.copyTo(output) }
-            } ?: throw FileNotFoundException("Nao foi possivel abrir o destino externo.")
+            }
         } catch (error: Exception) {
-            if (created) runCatching { target.delete() }
+            if (created) runCatching { DocumentsContract.deleteDocument(resolver, target.uri) }
             throw error
         }
         return DocumentTreeImportResult(
@@ -183,16 +180,14 @@ class DocumentTreeAccess(context: Context) {
         overwrite: Boolean,
         maxBytes: Long,
     ): PublicDownloadResult {
-        val source = resolve(sourcePath, requireExists = true)
-        require(source.isFile) { "A origem SAF nao e um arquivo." }
-        val declared = source.length()
-        require(declared < 0L || declared <= maxBytes) {
-            "Arquivo possui $declared bytes; espaco seguro disponivel e $maxBytes."
+        val tree = root(requireWrite = false)
+        val source = resolve(tree, sourcePath, requireExists = true)
+        require(!source.isDirectory) { "A origem SAF nao e um arquivo." }
+        require(source.size < 0L || source.size <= maxBytes) {
+            "Arquivo possui ${source.size} bytes; espaco seguro disponivel e $maxBytes."
         }
-        val resolvedMime = mimeType.ifBlank {
-            resolver.getType(source.uri).orEmpty().ifBlank { "application/octet-stream" }
-        }
-        return resolver.openInputStream(source.uri)?.buffered()?.use { input ->
+        val resolvedMime = mimeType.ifBlank { source.mime.ifBlank { "application/octet-stream" } }
+        return openInput(source.uri).buffered().use { input ->
             downloads.writeFrom(
                 path = destinationPath,
                 mimeType = resolvedMime,
@@ -200,13 +195,97 @@ class DocumentTreeAccess(context: Context) {
                 input = input,
                 maxBytes = maxBytes,
             )
-        } ?: throw FileNotFoundException("Nao foi possivel abrir o arquivo da arvore SAF.")
+        }
     }
 
-    private fun resolve(path: String, requireExists: Boolean): DocumentFile {
-        var current = root(requireWrite = false)
+    // ---- unstable provider access ----
+
+    private inline fun <T> withProvider(uri: Uri, block: (ContentProviderClient) -> T): T {
+        val client = resolver.acquireUnstableContentProviderClient(uri)
+            ?: throw FileNotFoundException("O app dono da pasta externa não está disponível.")
+        try {
+            return block(client)
+        } catch (error: RemoteException) {
+            throw IOException("O app dono da pasta externa (${uri.authority}) fechou no meio da operação; tente de novo.", error)
+        } finally {
+            client.close()
+        }
+    }
+
+    private fun query(tree: Uri, uri: Uri): List<Doc> = withProvider(uri) { client ->
+        client.query(uri, PROJECTION, null, null, null)?.use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    val id = cursor.getString(0) ?: continue
+                    add(
+                        Doc(
+                            uri = DocumentsContract.buildDocumentUriUsingTree(tree, id),
+                            id = id,
+                            name = cursor.getString(1) ?: "<sem-nome>",
+                            mime = cursor.getString(2).orEmpty(),
+                            size = if (cursor.isNull(3)) -1L else cursor.getLong(3),
+                            flags = if (cursor.isNull(4)) 0 else cursor.getInt(4),
+                        ),
+                    )
+                }
+            }
+        }.orEmpty()
+    }
+
+    private fun rootDoc(tree: Uri): Doc {
+        val id = DocumentsContract.getTreeDocumentId(tree)
+        return query(tree, DocumentsContract.buildDocumentUriUsingTree(tree, id)).firstOrNull()
+            ?: throw FileNotFoundException("A pasta externa concedida ficou indisponível.")
+    }
+
+    private fun children(tree: Uri, directory: Doc): List<Doc> =
+        query(tree, DocumentsContract.buildChildDocumentsUriUsingTree(tree, directory.id))
+
+    private fun openInput(uri: Uri): InputStream {
+        val descriptor = withProvider(uri) { it.openFile(uri, "r") }
+            ?: throw FileNotFoundException("Não foi possível abrir o arquivo externo.")
+        return ParcelFileDescriptor.AutoCloseInputStream(descriptor)
+    }
+
+    private fun openOutput(uri: Uri): OutputStream {
+        val descriptor = withProvider(uri) { it.openFile(uri, "wt") }
+            ?: throw FileNotFoundException("Não foi possível abrir o destino externo.")
+        return ParcelFileDescriptor.AutoCloseOutputStream(descriptor)
+    }
+
+    private fun ensureDirectories(tree: Uri, segments: List<String>): Doc {
+        var parent = rootDoc(tree)
+        segments.forEach { segment ->
+            val existing = children(tree, parent).firstOrNull { it.name == segment }
+            parent = when {
+                existing == null -> create(tree, parent, Document.MIME_TYPE_DIR, segment)
+                existing.isDirectory -> existing
+                else -> error("$segment existe e não é uma pasta.")
+            }
+        }
+        return parent
+    }
+
+    private fun fileTarget(tree: Uri, parent: Doc, name: String, mime: String, overwrite: Boolean): Doc {
+        val existing = children(tree, parent).firstOrNull { it.name == name }
+        require(existing == null || overwrite) { "Arquivo externo já existe." }
+        require(existing == null || !existing.isDirectory) { "O destino externo não é um arquivo." }
+        return existing ?: create(tree, parent, mime, name)
+    }
+
+    private fun create(tree: Uri, parent: Doc, mime: String, name: String): Doc {
+        val uri = try {
+            DocumentsContract.createDocument(resolver, parent.uri, mime, name)
+        } catch (error: Exception) {
+            throw IOException("Não foi possível criar $name na pasta externa: ${error.message}", error)
+        } ?: error("Não foi possível criar $name na pasta externa.")
+        return Doc(uri, DocumentsContract.getDocumentId(uri), name, mime, -1L, 0)
+    }
+
+    private fun resolve(tree: Uri, path: String, requireExists: Boolean): Doc {
+        var current = rootDoc(tree)
         normalize(path).forEach { segment ->
-            current = current.findFile(segment)
+            current = children(tree, current).firstOrNull { it.name == segment }
                 ?: if (requireExists) {
                     throw FileNotFoundException("Caminho externo não existe: $path")
                 } else {
@@ -216,14 +295,13 @@ class DocumentTreeAccess(context: Context) {
         return current
     }
 
-    private fun root(requireWrite: Boolean): DocumentFile {
+    private fun root(requireWrite: Boolean): Uri {
         val status = status()
         require(status.granted && status.canRead) {
             "Escolha uma pasta externa na aba Ferramentas."
         }
         if (requireWrite) require(status.canWrite) { "A pasta externa não permite escrita." }
-        return DocumentFile.fromTreeUri(appContext, Uri.parse(status.uri))
-            ?: error("A pasta externa concedida ficou indisponível.")
+        return Uri.parse(status.uri)
     }
 
     private fun normalize(path: String): List<String> {
@@ -240,6 +318,13 @@ class DocumentTreeAccess(context: Context) {
     private companion object {
         const val PREFERENCES_NAME = "document_tree_access"
         const val KEY_URI = "tree_uri"
+        val PROJECTION = arrayOf(
+            Document.COLUMN_DOCUMENT_ID,
+            Document.COLUMN_DISPLAY_NAME,
+            Document.COLUMN_MIME_TYPE,
+            Document.COLUMN_SIZE,
+            Document.COLUMN_FLAGS,
+        )
     }
 }
 

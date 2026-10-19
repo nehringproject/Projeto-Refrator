@@ -140,6 +140,18 @@ class HttpModelProvider(
             return
         }
 
+        // Usage-limit headers (5-hour/weekly plan windows, per-minute API limits) for the UI.
+        connection.headerFields
+            .orEmpty()
+            .mapNotNull { (key, values) ->
+                val name = key?.lowercase() ?: return@mapNotNull null
+                if (RATE_LIMIT_PREFIXES.none(name::startsWith)) return@mapNotNull null
+                values?.firstOrNull()?.let { name to it.take(200) }
+            }
+            .toMap()
+            .takeIf { it.isNotEmpty() }
+            ?.let { emit(ProviderEvent.RateLimits(it)) }
+
         val contentType = connection.contentType.orEmpty().lowercase()
         // Some routes stream SSE without declaring a Content-Type at all, so only an explicit
         // non-SSE type (JSON, HTML…) takes the buffered path below.
@@ -862,3 +874,5 @@ private fun JSONObject.stringOrNull(name: String): String? =
     if (!has(name) || isNull(name)) null else optString(name)
 
 private val SNIPPET_WHITESPACE = Regex("""\s+""")
+
+private val RATE_LIMIT_PREFIXES = listOf("x-codex-", "x-ratelimit-", "anthropic-ratelimit-", "openai-ratelimit-")

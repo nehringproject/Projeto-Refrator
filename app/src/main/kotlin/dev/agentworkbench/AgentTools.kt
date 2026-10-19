@@ -113,6 +113,8 @@ class AgentToolbox(
     workspaceRoot: File,
     private val activity: Activity? = appContext as? Activity,
     private val conversationId: String? = null,
+    /** The prisma using these tools (groups pass it; private chats derive it from the conversation). */
+    private val callerBotId: String? = null,
 ) {
     private val workspace = workspaceRoot.canonicalFile
     private val contextMemory = ContextMemoryRepository(appContext)
@@ -127,7 +129,9 @@ class AgentToolbox(
         .runners(workspace)
         .firstOrNull { it.descriptor.id == "power-android-shell" }
     private val privilegedShell = DistributionBindings.privilegedShellBridge(appContext)
-    private val shadowDisplay = DistributionBindings.shadowDisplayBridge(appContext)
+    // Each prisma operates its own parallel screen; plain chats share the default one.
+    private val shadowDisplay: ShadowDisplayBridge = (callerBotId ?: conversationId?.let { BotRepository(appContext).bySession(it)?.id })
+        ?.let { PrismaDisplays.forBot(appContext, it) } ?: DistributionBindings.shadowDisplayBridge(appContext)
     private val termuxBridge = DistributionBindings.termuxBridge(appContext)
     private val accessibility = DistributionBindings.accessibilityBridge(appContext)
     private val notifications = DistributionBindings.notificationBridge(appContext)
@@ -161,6 +165,8 @@ class AgentToolbox(
         add(tool("agent_profiles", "Lista perfis de agentes disponíveis e o perfil selecionado.", "{}"))
         add(tool("mcp_servers", "Lista servidores MCP configurados sem expor credenciais ou variáveis de ambiente.", "{}"))
         add(tool("command_templates", "Lista comandos reutilizáveis e seus esquemas de argumentos.", "{}"))
+        // Sociedade Prisma (Maestro, routines, groups) and the native phone plugins enabled in the store.
+        addAll(SocietyTools.definitions(appContext))
         add(
             tool(
                 "memory_save",
@@ -193,6 +199,10 @@ class AgentToolbox(
             add(tool("shadow_tap", "Toca uma coordenada somente na tela paralela.", """{"type":"object","properties":{"x":{"type":"integer","minimum":0},"y":{"type":"integer","minimum":0}},"required":["x","y"],"additionalProperties":false}"""))
             add(tool("shadow_swipe", "Desliza somente na tela paralela.", """{"type":"object","properties":{"x1":{"type":"integer","minimum":0},"y1":{"type":"integer","minimum":0},"x2":{"type":"integer","minimum":0},"y2":{"type":"integer","minimum":0},"duration_ms":{"type":"integer","minimum":50,"maximum":10000,"default":350}},"required":["x1","y1","x2","y2"],"additionalProperties":false}"""))
             add(tool("shadow_text", "Digita texto na tela paralela sem interferir no teclado da tela física.", """{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":500}},"required":["text"],"additionalProperties":false}"""))
+        add(tool("shadow_open_url", "Abre um endereço (http/https/content/file) direto numa janela do navegador só sua, na sua tela paralela. Muito mais rápido e confiável que digitar na barra; não mexe no Chrome do usuário.", """{"type":"object","properties":{"url":{"type":"string","minLength":8,"maxLength":2000}},"required":["url"],"additionalProperties":false}"""))
+        add(tool("shadow_actions", "Faz VÁRIAS ações seguidas na sua tela paralela numa chamada só (como uma pessoa) e devolve a captura final (você vê a imagem) e o texto da tela. Cada passo é um objeto: {\"tap\":[x,y]}, {\"swipe\":[x1,y1,x2,y2,ms]}, {\"text\":\"...\"}, {\"clear\":true}, {\"key\":4}, {\"wait_ms\":800}, {\"open_url\":\"https://...\"}, {\"launch\":\"pacote\"}. Prefira isto a chamar shadow_tap/shadow_text um por um.", """{"type":"object","properties":{"steps":{"type":"array","minItems":1,"maxItems":30,"items":{"type":"object"}},"screenshot":{"type":"boolean","default":true}},"required":["steps"],"additionalProperties":false}"""))
+        add(tool("shadow_screen_text", "Lê a sua tela paralela como texto curto: uma linha por texto ou controle, com o centro (x,y) para tocar. Bem mais leve que shadow_ui.", """{"type":"object","properties":{"max_lines":{"type":"integer","minimum":10,"maximum":200,"default":80}},"additionalProperties":false}"""))
+        add(tool("shadow_clear_text", "Apaga todo o texto do campo com foco na sua tela paralela (selecionar tudo + apagar), antes de digitar.", "{}"))
         add(tool("shadow_key", "Envia um Android keycode para a tela paralela (por exemplo BACK=4, HOME=3).", """{"type":"object","properties":{"key_code":{"type":"integer","minimum":0,"maximum":1000}},"required":["key_code"],"additionalProperties":false}"""))
         add(tool("android_device_info", "Lê modelo, versão Android, ABI e espaço do sandbox.", "{}"))
         add(
@@ -501,6 +511,7 @@ class AgentToolbox(
                 ),
             )
         add(tool("accessibility_status", "Mostra separadamente se o serviço Android está conectado e se a Central de Capacidades autorizou o agente.", "{}"))
+            add(tool("accessibility_screen_text", "Lê a tela ativa só como texto, rápido e barato: uma linha por texto ou controle, em ordem de leitura. Controles vêm com o id do nó ([n0.3.1] botão \"Enviar\") para usar direto em accessibility_action. Prefira esta antes de accessibility_snapshot ou screenshots.", """{"type":"object","properties":{"max_lines":{"type":"integer","minimum":1,"maximum":400,"default":150},"with_bounds":{"type":"boolean","default":false,"description":"Inclui o centro @x,y de cada controle para accessibility_gesture."}},"additionalProperties":false}"""))
             add(tool("accessibility_snapshot", "Lê a árvore de UI do app ativo. Campos password são substituídos localmente e IDs expiram quando a tela muda.", """{"type":"object","properties":{"max_nodes":{"type":"integer","minimum":1,"maximum":300,"default":160}},"additionalProperties":false}"""))
             add(tool("accessibility_action", "Executa ação em um nó do último snapshot. Nunca preenche campos password.", """{"type":"object","properties":{"node_id":{"type":"string","pattern":"^n0(?:\\.[0-9]{1,3}){0,18}$"},"action":{"type":"string","enum":["click","long_click","focus","scroll_forward","scroll_backward","set_text"]},"text":{"type":"string","maxLength":16384}},"required":["node_id","action"],"additionalProperties":false}"""))
             add(tool("accessibility_global", "Executa uma ação global oficial do AccessibilityService.", """{"type":"object","properties":{"action":{"type":"string","enum":["back","home","recents","notifications","quick_settings"]}},"required":["action"],"additionalProperties":false}"""))
@@ -697,6 +708,11 @@ class AgentToolbox(
         val name = invocation.toolName
         var command: CommandSpec? = null
         val (capabilities, effect, reversible, summary) = when (name) {
+            in SocietyTools.names -> try {
+                SocietyTools.plan(name, arguments).let { ToolPlan(emptySet(), it.effect, it.effect == ToolEffect.READ_ONLY, it.summary) }
+            } catch (error: SocietyTools.Invalid) {
+                throw ToolValidationException(error.message ?: "Argumentos inválidos.")
+            }
             "ask_user" -> ToolPlan(
                 emptySet(),
                 ToolEffect.READ_ONLY,
@@ -804,7 +820,11 @@ class AgentToolbox(
                     "Aguardar o aplicativo paralelo sem nova chamada ao provider.",
                 )
             }
-            "shadow_tap", "shadow_swipe", "shadow_text", "shadow_key" -> ToolPlan(
+            "shadow_screen_text" -> ToolPlan(
+                setOf(Capability.EXTERNAL_APP_CONTROL), ToolEffect.READ_ONLY, true,
+                "Ler a tela paralela como texto.",
+            )
+            "shadow_tap", "shadow_swipe", "shadow_text", "shadow_key", "shadow_open_url", "shadow_actions", "shadow_clear_text" -> ToolPlan(
                 setOf(Capability.EXTERNAL_APP_CONTROL), ToolEffect.EXTERNAL_MUTATION, false,
                 "Enviar ${name.removePrefix("shadow_")} somente à tela paralela.",
             )
@@ -1202,7 +1222,7 @@ class AgentToolbox(
                 setOf(Capability.PROCESS_INSPECT), ToolEffect.READ_ONLY, true,
                 "Consultar estado de uma capacidade Android.",
             )
-            "accessibility_snapshot", "notification_list" -> ToolPlan(
+            "accessibility_snapshot", "accessibility_screen_text", "notification_list" -> ToolPlan(
                 setOf(Capability.EXTERNAL_APP_CONTROL), ToolEffect.READ_ONLY, true,
                 "Ler contexto Android autorizado e redigido.",
             )
@@ -1492,6 +1512,7 @@ class AgentToolbox(
                 "android_shell",
                 "adb_shell",
                 "accessibility_snapshot",
+                "accessibility_screen_text",
                 "accessibility_action",
                 "accessibility_global",
                 "accessibility_gesture",
@@ -1533,7 +1554,7 @@ class AgentToolbox(
                 "python_package_install",
                 "python_package_remove",
                 "python_env_reset",
-            ),
+            ) && name !in SocietyTools.names,
             reversible = reversible,
             summary = summary,
             payloadFingerprint = command?.fingerprint()
@@ -1563,6 +1584,18 @@ class AgentToolbox(
         "ask_user" -> throw ToolValidationException(
             "ask_user deve ser resolvida pela interface de conversa.",
         )
+        in SocietyTools.names -> try {
+            SocietyTools.execute(
+                appContext,
+                activity,
+                prepared.invocation.toolName,
+                prepared.arguments,
+                callerBotId ?: BotRepository(appContext).bySession(conversationId)?.id,
+                conversationId,
+            )
+        } catch (error: SocietyTools.Invalid) {
+            throw ToolValidationException(error.message ?: "Argumentos inválidos.")
+        }
         "memory_list" -> memoryList()
         "agent_profiles" -> agentProfiles()
         "mcp_servers" -> mcpServers()
@@ -1588,6 +1621,10 @@ class AgentToolbox(
         )
         "shadow_text" -> shadowText(prepared.arguments.requiredString("text", 500))
         "shadow_key" -> requireShadowDisplay().keyEvent(prepared.arguments.intIn("key_code", 4, 0, 1_000))
+        "shadow_open_url" -> shadowOpenUrl(prepared.arguments.requiredString("url", 2_000))
+        "shadow_clear_text" -> shadowClearText()
+        "shadow_screen_text" -> shadowScreenText(prepared.arguments.intIn("max_lines", 80, 10, 200))
+        "shadow_actions" -> shadowActions(prepared.arguments)
         "android_device_info" -> deviceInfo()
         "workspace_list" -> listWorkspace(prepared.arguments)
         "workspace_read" -> readWorkspace(prepared.arguments)
@@ -1685,6 +1722,10 @@ class AgentToolbox(
         "runtime_inventory" -> runtimeInventory()
         "shizuku_status" -> shizukuStatus()
         "accessibility_status" -> accessibility.status()
+        "accessibility_screen_text" -> accessibility.screenText(
+            prepared.arguments.intIn("max_lines", 150, 1, 400),
+            prepared.arguments.optBoolean("with_bounds", false),
+        )
         "accessibility_snapshot" -> accessibility.snapshot(
             prepared.arguments.intIn("max_nodes", 160, 1, 300),
         )
@@ -2547,16 +2588,106 @@ class AgentToolbox(
      * accessibility ACTION_SET_TEXT on the focused field of the parallel display, falling back to
      * clipboard + KEYCODE_PASTE there when accessibility is off.
      */
+    private fun shadowDisplayIdOrFail(): Int =
+        requireShadowDisplay().snapshot().displayId ?: throw ToolValidationException("Sua tela paralela não está ativa: use shadow_display_start.")
+
+    /** Opens a URL in a separate browser window/task on this display (never the user's Chrome task). */
+    private suspend fun shadowOpenUrl(url: String): String {
+        val clean = url.trim()
+        requireTool(Regex("^(https?|content|file)://[^\\s'\"`$\\\\]+$").matches(clean), "Endereço inválido (use http, https, content ou file, sem espaços nem aspas).")
+        val id = shadowDisplayIdOrFail()
+        val chrome = runCatching { appContext.packageManager.getPackageInfo("com.android.chrome", 0); true }.getOrDefault(false)
+        val script = "am start --display $id -a android.intent.action.VIEW -d '$clean' -f 0x18000000" + if (chrome) " -p com.android.chrome" else ""
+        val output = privilegedShell.execute(script, 15_000, 16_384)
+        requireTool("Error" !in output && "Exception" !in output, output.take(400))
+        delay(1_200)
+        return JSONObject().put("opened", clean).put("display_id", id).put("separate_window", true).toString()
+    }
+
+    private suspend fun shadowClearText(): String {
+        val id = shadowDisplayIdOrFail()
+        // Select all (CTRL+A) and delete, only on this display.
+        privilegedShell.execute("input -d $id keycombination 113 29 && input -d $id keyevent 67", 10_000, 4_096)
+        return JSONObject().put("ok", true).put("display_id", id).toString()
+    }
+
+    /** The parallel screen as short lines "(x,y) botão Texto", built from its accessibility tree. */
+    private fun shadowScreenText(maxLines: Int): String {
+        val id = shadowDisplayIdOrFail()
+        val raw = runCatching { JSONObject(accessibility.snapshotDisplay(id, 300)) }.getOrNull()
+            ?: return "(acessibilidade indisponível; use shadow_screenshot)"
+        val lines = mutableListOf<String>()
+        val seen = HashSet<String>()
+        val windows = raw.optJSONArray("windows") ?: JSONArray()
+        for (w in 0 until windows.length()) {
+            val nodes = windows.optJSONObject(w)?.optJSONArray("nodes") ?: continue
+            for (n in 0 until nodes.length()) {
+                val node = nodes.optJSONObject(n) ?: continue
+                val label = node.optString("text").ifBlank { node.optString("description") }.replace(Regex("\\s+"), " ").trim().take(100)
+                val clickable = node.optBoolean("clickable")
+                val editable = node.optBoolean("editable")
+                if (label.isBlank() && !editable) continue
+                val b = node.optString("bounds").split(',').mapNotNull { it.trim().toIntOrNull() }
+                val center = if (b.size == 4) "(${(b[0] + b[2]) / 2},${(b[1] + b[3]) / 2})" else ""
+                val kind = when { editable -> "campo"; clickable -> "botão"; else -> "" }
+                val line = "$center ${kind.ifBlank { "" }} ${if (label.isBlank()) "(vazio)" else label}".replace(Regex(" +"), " ").trim()
+                if (seen.add(line)) lines += line
+                if (lines.size >= maxLines) break
+            }
+        }
+        return lines.joinToString("\n").ifBlank { "(nenhum texto legível; use shadow_screenshot)" }
+    }
+
+    /** Several actions in one call, then a screenshot (shown to vision models) and the screen as text. */
+    private suspend fun shadowActions(arguments: JSONObject): String {
+        val steps = arguments.optJSONArray("steps") ?: throw ToolValidationException("Informe steps.")
+        requireTool(steps.length() in 1..30, "Use de 1 a 30 passos.")
+        val shadow = requireShadowDisplay()
+        val done = JSONArray()
+        for (index in 0 until steps.length()) {
+            val step = steps.optJSONObject(index) ?: throw ToolValidationException("Passo ${index + 1} inválido.")
+            val result = runCatching {
+                when {
+                    step.has("tap") -> step.getJSONArray("tap").let { shadow.tap(it.getInt(0), it.getInt(1)) }
+                    step.has("swipe") -> step.getJSONArray("swipe").let { shadow.swipe(it.getInt(0), it.getInt(1), it.getInt(2), it.getInt(3), it.optInt(4, 350)) }
+                    step.has("text") -> shadowText(step.getString("text").take(500))
+                    step.has("clear") -> shadowClearText()
+                    step.has("key") -> shadow.keyEvent(step.getInt("key").coerceIn(0, 1_000))
+                    step.has("wait_ms") -> { delay(step.getLong("wait_ms").coerceIn(50, 10_000)); "ok" }
+                    step.has("open_url") -> shadowOpenUrl(step.getString("open_url"))
+                    step.has("launch") -> shadow.launch(step.getString("launch"))
+                    else -> throw ToolValidationException("Passo ${index + 1} sem ação conhecida.")
+                }
+            }
+            done.put(JSONObject().put("step", index + 1).put("ok", result.isSuccess).put("error", result.exceptionOrNull()?.message ?: JSONObject.NULL))
+            if (result.isFailure) break
+            delay(220)
+        }
+        val output = JSONObject().put("steps", done)
+        if (arguments.optBoolean("screenshot", true)) {
+            delay(500)
+            runCatching {
+                val destination = resolve("shadow/acoes-${System.currentTimeMillis()}.png", mustExist = false)
+                val saved = shadow.saveScreenshot(destination)
+                output.put("path", relative(saved))
+            }
+            output.put("tela", runCatching { shadowScreenText(60) }.getOrDefault(""))
+        }
+        return output.toString(2)
+    }
+
     private suspend fun shadowText(text: String): String {
         val shadow = requireShadowDisplay()
         if (text.all { it.code in 0x20..0x7E }) return shadow.text(text)
         val displayId = shadow.snapshot().displayId ?: throw ToolValidationException("ShadowDisplay não está ativo.")
         runCatching { accessibility.setFocusedText(displayId, text) }.getOrNull()?.let { return it }
-        withContext(Dispatchers.Main) {
-            appContext.getSystemService(android.content.ClipboardManager::class.java)
-                ?.setPrimaryClip(android.content.ClipData.newPlainText("Refrator", text))
-        }
+        val clipboard = appContext.getSystemService(android.content.ClipboardManager::class.java)
+        val previous = withContext(Dispatchers.Main) { runCatching { clipboard?.primaryClip }.getOrNull() }
+        withContext(Dispatchers.Main) { clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Refrator", text)) }
         shadow.keyEvent(android.view.KeyEvent.KEYCODE_PASTE)
+        // Give the user's clipboard back.
+        delay(400)
+        withContext(Dispatchers.Main) { runCatching { previous?.let { clipboard?.setPrimaryClip(it) } } }
         return JSONObject()
             .put("ok", true)
             .put("display_id", displayId)

@@ -9,8 +9,17 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Agenda plugin: reads upcoming events (asked at first use). Alarms go through the Clock app. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <queries>
         <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="mailto" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
@@ -66,6 +75,16 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
+        <service
+            android:name=".TeamKeepAliveService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started AI team work and a local-only web server, with visible status and stop control" />
+        </service>
         <service
             android:name=".AgentExecutionService"
             android:enabled="true"
@@ -126,6 +145,11 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!-- Inline reply and "Marcar como lida" from Prisma notifications. Only our own notifications reach it. -->
+        <receiver
+            android:name=".PrismaNotificationReceiver"
+            android:exported="false" />
 
         <receiver
             android:name=".AgentBootReceiver"

@@ -29,6 +29,7 @@ class ShizukuUserService() : IPrivilegedShellService.Stub() {
 
     override fun destroy() {
         releaseShadowDisplay()
+        slots.keys.toList().forEach(::releaseSlotDisplay)
         System.exit(0)
     }
 
@@ -150,6 +151,95 @@ class ShizukuUserService() : IPrivilegedShellService.Stub() {
         return runInput("keyevent", keyCode.toString())
     }
 
+    // --- One parallel screen per prisma ------------------------------------------------------
+
+    private class SlotDisplay(val callback: Any, val id: Int, val width: Int, val height: Int, val density: Int)
+
+    private val slots = java.util.concurrent.ConcurrentHashMap<String, SlotDisplay>()
+
+    @Synchronized
+    override fun createSlotDisplay(slot: String, surface: Surface, width: Int, height: Int, densityDpi: Int): Int {
+        require(SLOT_NAME.matches(slot)) { "Nome de tela invalido." }
+        require(width in 360..1920 && height in 640..3200) { "Dimensoes invalidas." }
+        require(densityDpi in 120..640) { "Densidade invalida." }
+        require(slots.size < MAX_SLOTS || slots.containsKey(slot)) { "Limite de $MAX_SLOTS telas paralelas atingido." }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) error("Tela paralela exige Android 14 ou superior.")
+        releaseSlotDisplay(slot)
+        return createSlotApi34(slot, surface, width, height, densityDpi)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @SuppressLint("WrongConstant")
+    private fun createSlotApi34(slot: String, surface: Surface, width: Int, height: Int, densityDpi: Int): Int {
+        val flags = FLAG_PUBLIC or FLAG_OWN_CONTENT_ONLY or FLAG_SUPPORTS_TOUCH or
+            FLAG_DESTROY_CONTENT_ON_REMOVAL or FLAG_TRUSTED or FLAG_ALWAYS_UNLOCKED or FLAG_OWN_FOCUS
+        val config = VirtualDisplayConfig.Builder("Refrator $slot", width, height, densityDpi)
+            .setSurface(surface).setFlags(flags).build()
+        val callback = createVirtualDisplayCallback()
+        val manager = displayManagerBinder()
+        val create = manager.javaClass.methods.firstOrNull {
+            it.name == "createVirtualDisplay" && it.parameterTypes.size == 4
+        } ?: error("IDisplayManager.createVirtualDisplay indisponivel neste Android.")
+        val id = create.invoke(manager, config, callback, null, SHELL_PACKAGE) as Int
+        check(id >= 0) { "O Android recusou a criacao da tela virtual ($id)." }
+        slots[slot] = SlotDisplay(callback, id, width, height, densityDpi)
+        return id
+    }
+
+    @Synchronized
+    override fun releaseSlotDisplay(slot: String) {
+        val record = slots.remove(slot) ?: return
+        runCatching {
+            val manager = displayManagerBinder()
+            manager.javaClass.methods.first { it.name == "releaseVirtualDisplay" && it.parameterTypes.size == 1 }
+                .invoke(manager, record.callback)
+        }
+    }
+
+    override fun slotState(slot: String): String {
+        val record = slots[slot]
+        return org.json.JSONObject()
+            .put("slot", slot)
+            .put("available", record != null)
+            .put("display_id", record?.id ?: org.json.JSONObject.NULL)
+            .put("width", record?.width ?: 0)
+            .put("height", record?.height ?: 0)
+            .put("slots_in_use", slots.size)
+            .toString()
+    }
+
+    override fun slotLaunch(slot: String, packageName: String): String {
+        require(PACKAGE_NAME.matches(packageName)) { "Nome de pacote invalido." }
+        val record = slots[slot] ?: error("Tela paralela de $slot nao esta ativa.")
+        val component = runProcess(
+            listOf("/system/bin/cmd", "package", "resolve-activity", "--brief", "-a", Intent.ACTION_MAIN, "-c", Intent.CATEGORY_LAUNCHER, packageName),
+        ).lineSequence().map(String::trim).lastOrNull { '/' in it } ?: error("O pacote nao possui Activity inicializavel.")
+        val launched = runProcess(listOf("/system/bin/am", "start", "--display", record.id.toString(), "-n", component))
+        check("Error:" !in launched && "Exception" !in launched) { launched }
+        return org.json.JSONObject().put("launched", true).put("package", packageName).put("display_id", record.id).toString()
+    }
+
+    override fun slotInput(slot: String, action: String, args: Array<String>): String {
+        val record = slots[slot] ?: error("Tela paralela de $slot nao esta ativa.")
+        fun point(x: String, y: String) {
+            val px = x.toInt()
+            val py = y.toInt()
+            require(px in 0 until record.width && py in 0 until record.height) { "Coordenada fora da tela ${record.width}x${record.height}." }
+        }
+        val arguments = when (action) {
+            "tap" -> { require(args.size == 2); point(args[0], args[1]); listOf("tap", args[0], args[1]) }
+            "swipe" -> {
+                require(args.size == 5); point(args[0], args[1]); point(args[2], args[3])
+                listOf("swipe", args[0], args[1], args[2], args[3], args[4].toInt().coerceIn(50, 10_000).toString())
+            }
+            "text" -> { require(args.size == 1 && args[0].length in 1..500); listOf("text", args[0].replace("%", "%25").replace(" ", "%s")) }
+            "keyevent" -> { require(args.size == 1 && args[0].toInt() in 0..1_000); listOf("keyevent", args[0]) }
+            else -> error("Acao invalida.")
+        }
+        runProcess(listOf("/system/bin/input", "-d", record.id.toString()) + arguments)
+        return org.json.JSONObject().put("ok", true).put("display_id", record.id).put("action", action).toString()
+    }
+
     private fun requireShadowDisplayId(): Int = shadowDisplayId
         ?: error("ShadowDisplay nao esta ativo.")
 
@@ -214,7 +304,8 @@ class ShizukuUserService() : IPrivilegedShellService.Stub() {
         val bytes = ByteArrayOutputStream(minOf(boundedOutput, 16_384))
         var truncated = false
         val reader = thread(start = true, isDaemon = true, name = "privileged-shell-output") {
-            process.inputStream.use { input ->
+            // destroy() on timeout closes the stream under this read: expected, not a crash.
+            try { process.inputStream.use { input ->
                 val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                 while (true) {
                     val count = input.read(buffer)
@@ -225,6 +316,7 @@ class ShizukuUserService() : IPrivilegedShellService.Stub() {
                         if (count > remaining) truncated = true
                     }
                 }
+            } } catch (_: java.io.IOException) {
             }
         }
         val completed = process.waitFor(boundedTimeout.toLong(), TimeUnit.MILLISECONDS)
@@ -246,6 +338,8 @@ class ShizukuUserService() : IPrivilegedShellService.Stub() {
     private companion object {
         val PACKAGE_NAME = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")
         const val SHELL_PACKAGE = "com.android.shell"
+        val SLOT_NAME = Regex("[a-z0-9-]{1,48}")
+        const val MAX_SLOTS = 8
         const val FLAG_PUBLIC = 1 shl 0
         const val FLAG_OWN_CONTENT_ONLY = 1 shl 3
         const val FLAG_SUPPORTS_TOUCH = 1 shl 6

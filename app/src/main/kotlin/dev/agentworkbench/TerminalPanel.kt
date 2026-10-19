@@ -113,7 +113,7 @@ internal object EmbeddedTerminalSessions {
         viewRef.get()?.attachSession(sessions[index])
     }
 
-    fun open(context: Context, workspace: File): Boolean {
+    fun open(context: Context, workspace: File, initialCommand: String? = null): Boolean {
         val runtime = DistributionBindings.runtimePackBridge(
             context.applicationContext,
             internalRuntimeRoot(context),
@@ -170,6 +170,11 @@ internal object EmbeddedTerminalSessions {
             TRANSCRIPT_ROWS,
             sessionClient,
         )
+        // Queued until the shell starts, then typed as if the user had entered it.
+        initialCommand?.let { command ->
+            val bytes = "$command\r".toByteArray()
+            session.write(bytes, 0, bytes.size)
+        }
         sessions += session
         select(sessions.lastIndex)
         return true

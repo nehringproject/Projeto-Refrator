@@ -58,6 +58,80 @@ class AgentAccessibilityController(context: Context) : AccessibilityAutomationBr
             .toString(2)
     }
 
+    /**
+     * Reads the active screen as plain text in reading order. Controls carry their node id so the
+     * model can act on them right away (`[n0.3.1] botão "Enviar"`); text inside a control is
+     * folded into its label, and repeated plain text is dropped. Passwords stay redacted.
+     */
+    override fun screenText(maxLines: Int, withBounds: Boolean): String {
+        requireAuthorized()
+        val service = AgentAccessibilityRuntime.service ?: error("AccessibilityService não está conectado.")
+        val root = service.rootInActiveWindow ?: error("A janela ativa não expôs árvore de acessibilidade.")
+        val limit = maxLines.coerceIn(1, 400)
+        val lines = mutableListOf<String>()
+        val seen = HashSet<String>()
+        var truncated = false
+
+        fun label(node: AccessibilityNodeInfo): String {
+            if (node.isPassword) return "[PROTEGIDO]"
+            val own = safe(node.text).ifBlank { safe(node.contentDescription) }
+            val hint = if (own.isBlank() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safe(node.hintText) else ""
+            return own.ifBlank { hint }.replace(Regex("\\s+"), " ").trim().take(160)
+        }
+
+        fun innerText(node: AccessibilityNodeInfo, depth: Int, out: StringBuilder) {
+            if (depth > 4 || out.length > 120) return
+            for (index in 0 until node.childCount) {
+                val child = node.getChild(index) ?: continue
+                val text = label(child)
+                if (text.isNotEmpty() && !out.contains(text)) {
+                    if (out.isNotEmpty()) out.append(" · ")
+                    out.append(text)
+                }
+                innerText(child, depth + 1, out)
+            }
+        }
+
+        fun where(node: AccessibilityNodeInfo): String {
+            if (!withBounds) return ""
+            val bounds = Rect().also(node::getBoundsInScreen)
+            return " @${bounds.centerX()},${bounds.centerY()}"
+        }
+
+        fun walk(node: AccessibilityNodeInfo, id: String, depth: Int, insideControl: Boolean) {
+            if (lines.size >= limit) {
+                truncated = true
+                return
+            }
+            if (depth > 18 || !node.isVisibleToUser) return
+            val kind = when {
+                node.isEditable -> "campo"
+                node.isCheckable -> if (node.isChecked) "marcado" else "desmarcado"
+                node.isClickable || node.isLongClickable -> "botão"
+                else -> null
+            }
+            if (kind != null) {
+                var text = label(node)
+                if (text.isEmpty()) text = StringBuilder().also { innerText(node, 0, it) }.toString().take(160)
+                val value = if (node.isEditable && !node.isPassword && text.isEmpty()) "vazio" else text
+                lines += "[$id] $kind \"$value\"${where(node)}"
+            } else if (node.isScrollable) {
+                lines += "[$id] lista rolável${where(node)}"
+            } else if (!insideControl) {
+                val text = label(node)
+                if (text.isNotEmpty() && seen.add(text)) lines += text
+            }
+            for (index in 0 until node.childCount) {
+                node.getChild(index)?.let { child -> walk(child, "$id.$index", depth + 1, insideControl || kind != null) }
+            }
+        }
+
+        walk(root, "n0", 0, insideControl = false)
+        val header = "app: ${root.packageName ?: "?"} · ${lines.size} linhas"
+        val footer = if (truncated) "\n… tela maior que $limit linhas; peça max_lines maior ou role a lista." else ""
+        return header + "\n" + lines.joinToString("\n") + footer
+    }
+
     override fun snapshotDisplay(displayId: Int, maxNodes: Int): String {
         requireAuthorized()
         val service = AgentAccessibilityRuntime.service ?: error("AccessibilityService não está conectado.")

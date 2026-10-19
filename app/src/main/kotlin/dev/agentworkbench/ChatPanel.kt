@@ -1,6 +1,7 @@
 package dev.agentworkbench
 
 import android.app.Activity
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.LinearEasing
@@ -274,6 +275,11 @@ fun ChatPanel(
     onSessionSaved: (ChatSessionSummary) -> Unit,
     onBusyChanged: (Boolean) -> Unit,
     onSettingsChange: (ProviderSettings) -> Unit = {},
+    bot: Bot? = null,
+    /** Bumped by the header button to open the conversation panel. */
+    inspectorRequest: Int = 0,
+    /** Text to put in the composer when the chat opens (e.g. "ask Maestro to set up a plugin"). */
+    prefill: String? = null,
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -305,6 +311,14 @@ fun ChatPanel(
     // Tokens ocupados na janela do modelo: estimativa local antes do envio, trocada pelo
     // valor real assim que o provider reporta Usage.
     var contextUsage by remember(sessionId) { mutableStateOf<ContextUsage?>(null) }
+    var sessionUsage by remember(sessionId) { mutableStateOf(SessionUsageStore.load(context, sessionId)) }
+    var inspectorOpen by remember { mutableStateOf(false) }
+    var inspectorTab by remember { mutableStateOf(0) }
+    var viewer by remember { mutableStateOf<Pair<List<File>, Int>?>(null) }
+    LaunchedEffect(inspectorRequest) { if (inspectorRequest > 0) inspectorOpen = true }
+    LaunchedEffect(sessionId, prefill) { if (!prefill.isNullOrBlank()) prompt = prefill }
+    // A prisma may have its own provider/model (Sol for one, DeepSeek for another…).
+    val prismaSettings = remember(settings, bot) { repository.settingsForPrisma(bot, settings) }
     var workspaceCounts by remember { mutableStateOf(0 to 0) }
     val contextWindowTokens = remember(settings) { repository.effectiveContextWindowTokens(settings) }
     fun handleAttachment(uri: Uri?) {
@@ -333,7 +347,23 @@ fun ChatPanel(
     val photoPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri -> handleAttachment(uri) }
+    // Voice dictation through the system recognizer; the text lands in the composer for review.
+    val voiceLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val spoken = result.data
+            ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+        if (!spoken.isNullOrBlank()) prompt = if (prompt.isBlank()) spoken else "$prompt $spoken"
+    }
     var chatState by remember(sessionId) { mutableStateOf(ChatState()) }
+
+    /** Updates the last assistant message in place (thinking time, steps). */
+    fun updateLastAssistant(transform: (ChatMessage) -> ChatMessage) {
+        val target = chatState.messages.lastOrNull { it.role == ChatRole.ASSISTANT } ?: return
+        chatState = chatState.copy(messages = chatState.messages.map { if (it.id == target.id) transform(it) else it })
+    }
     LaunchedEffect(chatState.messages.lastOrNull()?.let { it.id to it.status }) {
         // Foreground and service execution converge on the displayed message state.
         when (chatState.messages.lastOrNull()?.status) {
@@ -364,6 +394,10 @@ fun ChatPanel(
         val snapshot = sessionRepository.load(sessionId)
         chatState = ChatState(messages = normalizeHistoricalMessages(snapshot?.messages.orEmpty()))
         providerLedger = snapshot?.providerLedger.orEmpty()
+        // Show how much of the window this conversation already fills before anything is sent.
+        if (providerLedger.isNotEmpty()) {
+            contextUsage = ContextUsage(ContinuousChatEngine.estimateTokens(providerLedger).toLong(), exact = false)
+        }
         toolActivities = snapshot?.toolActivities.orEmpty()
         approvalQueue = emptyList()
         questionQueue = emptyList()
@@ -531,7 +565,12 @@ fun ChatPanel(
                 selectedAgentProfile.systemPrompt.takeIf { it.isNotBlank() }?.let { prompt ->
                     "\n\n<agent_profile id=\"${selectedAgentProfile.id}\" name=\"${selectedAgentProfile.name}\">\n" +
                         prompt + "\n</agent_profile>"
-                }.orEmpty()
+                }.orEmpty() +
+                // A bot's job and standing rules shape every turn of its own conversation.
+                bot?.let { "\n\n" + it.systemPrompt() + societyContext(context, it) }.orEmpty() +
+                pluginsPrompt(context) +
+                // How close the account is to its limits / balance, so the model can warn the user.
+                AccountUsage.awareness(context, route.settings, sessionUsage.inputTokens + sessionUsage.outputTokens)
             val contextAssembly = contextMemoryRepository.assemble(
                 baseEnvironment = baseText,
                 workspaceId = workspaceId,
@@ -650,11 +689,30 @@ fun ChatPanel(
                             turnId = turnId,
                             event = event,
                         )
-                        if (event is ProviderEvent.Usage) {
+                        // The first visible text ends the "thinking" phase of this reply.
+                        if (event is ProviderEvent.TextDelta) {
+                            updateLastAssistant { message ->
+                                if (message.status != ChatMessageStatus.STREAMING || message.thinkingMillis > 0 || message.createdAtMillis <= 0) {
+                                    message
+                                } else {
+                                    message.copy(thinkingMillis = (System.currentTimeMillis() - message.createdAtMillis).coerceAtLeast(1))
+                                }
+                            }
+                        }
+                        if (event is ProviderEvent.RateLimits) {
+                            parseRateLimits(event.headers).takeIf { it.isNotEmpty() }?.let { RateLimitMemory.record(route.settings.preset.name, it) }
+                        } else if (event is ProviderEvent.Usage) {
                             contextUsage = ContextUsage(
                                 tokens = event.inputTokens + event.outputTokens,
                                 exact = true,
                             )
+                            sessionUsage = sessionUsage + SessionUsage(
+                                inputTokens = event.inputTokens,
+                                outputTokens = event.outputTokens,
+                                cachedTokens = event.cachedInputTokens ?: 0,
+                                calls = 1,
+                            )
+                            SessionUsageStore.save(context, sessionId, sessionUsage)
                         } else {
                             providerStatus = statusFor(event)
                         }
@@ -1149,14 +1207,11 @@ fun ChatPanel(
                 append(attachmentManifest)
             }
         }
-        val routes = repository.buildProviderRoutes(
-            active = settings,
-            allowLocalCleartext = allowLocalCleartext,
-        )
+        val routes = repository.routesForPrisma(bot, prismaSettings, allowLocalCleartext)
         val route = routes.firstOrNull()
         if (route == null) {
             providerStatus = when (
-                val result = repository.buildProvider(settings, allowLocalCleartext)
+                val result = repository.buildProvider(prismaSettings, allowLocalCleartext)
             ) {
                 is ProviderBuildResult.Rejected -> result.reason
                 is ProviderBuildResult.Ready -> "Nenhum provider disponível."
@@ -1218,7 +1273,7 @@ fun ChatPanel(
                         sessionId = sessionId,
                         turnId = turnId,
                         summary = submittedText.take(500),
-                        settings = settings,
+                        settings = prismaSettings,
                     )
                     persistentRunState = AgentRunState.QUEUED
                     providerStatus = "Tarefa enfileirada; iniciando serviço persistente…"
@@ -1253,6 +1308,13 @@ fun ChatPanel(
     val thinkingHint = toolActivities.lastOrNull { it.status == ToolActivityStatus.RUNNING }
         ?.let(::toolActivityHeadline)
         ?: concreteStatus(providerStatus)
+    // Every concrete step the agent takes is kept on the reply, so it can be reviewed later.
+    LaunchedEffect(thinkingHint) {
+        val step = thinkingHint?.trim()?.trimEnd('…', '.', ':')?.takeIf(String::isNotBlank) ?: return@LaunchedEffect
+        updateLastAssistant { message ->
+            if (message.thinkingTrail.lastOrNull() == step) message else message.copy(thinkingTrail = (message.thinkingTrail + step).takeLast(12))
+        }
+    }
     val agentBusy = chatState.isStreaming ||
         persistentDispatching ||
         persistentRunState.isExecuting() ||
@@ -1278,15 +1340,11 @@ fun ChatPanel(
             // Nenhum inset aqui: quem encolhe pro teclado é o Scaffold inteiro, no MainActivity.
             ,
     ) {
-        ContextStrip(
-            summary = contextSummary,
-            status = providerStatus.takeIf { agentBusy },
-            online = online,
-            onClick = onOpenSettings,
-        )
 
         if (chatState.messages.isEmpty() && toolActivities.isEmpty()) {
             EmptyChat(
+                bot = bot,
+                mascot = bot?.mascot ?: Mascots.forKey(sessionId),
                 settings = settings,
                 toolCount = toolbox.definitions.size,
                 skillCount = activeSkills.size,
@@ -1322,6 +1380,22 @@ fun ChatPanel(
                                 }?.id
                             ChatMessageBubble(
                                 message = message,
+                                // Bubbles glide when the list shifts (a bubble replaced or re-ordered), not jump.
+                                placement = Modifier.animateItem(),
+                                bot = bot,
+                                mascot = bot?.mascot ?: Mascots.forKey(sessionId),
+                                awaitingUser = isLastAssistant && (approvalQueue.isNotEmpty() || questionQueue.isNotEmpty()),
+                                workspaceRoot = workspaceRoot,
+                                onOpenImages = { files, index -> viewer = files to index },
+                                currentTool = if (isLastAssistant) {
+                                    toolActivities.lastOrNull { it.status == ToolActivityStatus.RUNNING }?.toolName
+                                } else {
+                                    null
+                                },
+                                onOpenInspector = {
+                                    inspectorTab = 0
+                                    inspectorOpen = true
+                                },
                                 thinkingHint = thinkingHint.takeIf { message.status == ChatMessageStatus.STREAMING },
                                 onCopy = {
                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
@@ -1444,7 +1518,42 @@ fun ChatPanel(
             }
         }
         HorizontalDivider(color = WorkbenchTokens.BorderSoft)
+        if (inspectorOpen) {
+            val conversationImages = chatState.messages
+                .filter { it.role == ChatRole.USER && it.text.contains(ATTACHMENT_MANIFEST_MARKER) }
+                .flatMap { parseAttachmentManifest(it.text).relativePaths.filter(::isImagePath) }
+                .map { File(workspaceRoot, it) }
+                .filter(File::isFile)
+            ConversationInspectorSheet(
+                state = InspectorState(
+                    generating = agentBusy,
+                    statusLine = thinkingHint ?: providerStatus,
+                    activities = toolActivities,
+                    images = conversationImages,
+                    contextTokens = contextUsage?.tokens,
+                    contextExact = contextUsage?.exact ?: false,
+                    contextWindowTokens = contextWindowTokens,
+                    sessionInputTokens = sessionUsage.inputTokens,
+                    sessionOutputTokens = sessionUsage.outputTokens,
+                    sessionCachedTokens = sessionUsage.cachedTokens,
+                    turns = sessionUsage.calls,
+                    rateLimits = RateLimitMemory.windows,
+                    providerName = prismaSettings.preset.displayName,
+                    modelId = prismaSettings.modelId,
+                    capabilities = prismaSettings.preset.capabilities.summary(),
+                ),
+                initialTab = inspectorTab,
+                onDismiss = { inspectorOpen = false },
+                imageContent = { file, modifier, onClick ->
+                    AttachmentThumb(file = file, size = 108.dp, modifier = modifier, onClick = onClick)
+                },
+            )
+        }
+        viewer?.let { (files, index) ->
+            ImageViewerDialog(files = files, startIndex = index, onDismiss = { viewer = null })
+        }
         Composer(
+            thumbnailRoot = workspaceRoot,
             prompt = prompt,
             sessionReady = loadedSessionId == sessionId,
             isStreaming = chatState.isStreaming,
@@ -1455,8 +1564,7 @@ fun ChatPanel(
             attachments = attachments,
             executionMode = settings.executionMode,
             reasoningEffort = settings.reasoningEffort,
-            reasoningSupported = settings.preset != ProviderPreset.DEMO &&
-                settings.preset != ProviderPreset.LOCAL_GGUF,
+            reasoningSupported = settings.preset.capabilities.reasoningEffort,
             contextUsage = contextUsage,
             contextWindowTokens = contextWindowTokens,
             contextCount = contextSummary.count,
@@ -1487,12 +1595,30 @@ fun ChatPanel(
             },
             onAttachPhoto = {
                 attachMenuOpen = false
+                if (!prismaSettings.preset.capabilities.images) {
+                    attachError = "${prismaSettings.preset.displayName} não aceita imagens; anexe como arquivo ou troque de modelo."
+                    return@Composer
+                }
                 photoPickerLauncher.launch(
                     androidx.activity.result.PickVisualMediaRequest(
                         ActivityResultContracts.PickVisualMedia.ImageOnly,
                     ),
                 )
             },
+            onVoice = {
+                runCatching {
+                    voiceLauncher.launch(
+                        android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                            .putExtra(
+                                android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                            )
+                            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+                            .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Fale sua mensagem"),
+                    )
+                }.onFailure { attachError = "Ditado por voz indisponível neste aparelho." }
+            },
+            accent = Mascots.of(bot?.mascot ?: Mascots.forKey(sessionId)).accent,
         )
     }
 }
@@ -1648,6 +1774,8 @@ private fun ProviderIdentityCard(
 
 @Composable
 private fun EmptyChat(
+    bot: Bot?,
+    mascot: Int,
     settings: ProviderSettings,
     toolCount: Int,
     skillCount: Int,
@@ -1672,24 +1800,17 @@ private fun EmptyChat(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Image(
-                painter = painterResource(R.drawable.refrator_icon_art),
-                contentDescription = "Refrator",
-                modifier = Modifier
-                    .stage(0)
-                    .size(44.dp)
-                    .clip(CircleShape),
-            )
+            MascotAvatar(index = mascot, size = 88.dp, modifier = Modifier.stage(0))
             Text(
-                text = "Como posso ajudar?",
+                text = bot?.let { "Oi! Eu sou ${it.name}" } ?: "Como posso ajudar?",
                 modifier = Modifier.stage(1),
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.SemiBold,
                 color = WorkbenchTokens.Text,
             )
             Text(
-                text = "${settings.modelId} · $toolCount ferramentas" +
-                    if (skillCount > 0) " · $skillCount skills" else "",
+                text = bot?.job?.take(140) ?: ("${settings.modelId} · $toolCount ferramentas" +
+                    if (skillCount > 0) " · $skillCount skills" else ""),
                 modifier = Modifier.stage(1),
                 style = MaterialTheme.typography.labelMedium,
                 color = WorkbenchTokens.TextFaint,
@@ -1753,114 +1874,149 @@ private fun ChatMessageBubble(
     onEdit: ((String) -> Unit)?,
     onRegenerate: (() -> Unit)?,
     thinkingHint: String? = null,
+    bot: Bot? = null,
+    mascot: Int = bot?.mascot ?: 0,
+    awaitingUser: Boolean = false,
+    workspaceRoot: File? = null,
+    onOpenImages: (List<File>, Int) -> Unit = { _, _ -> },
+    onOpenInspector: () -> Unit = {},
+    /** The tool running right now for this reply (picks the mascot's work animation). */
+    currentTool: String? = null,
+    /** Lazy-list placement (animateItem), supplied by the list. */
+    placement: Modifier = Modifier,
 ) {
     val isUser = message.role == ChatRole.USER
     var editing by remember(message.id) { mutableStateOf(false) }
     var editDraft by remember(message.id) { mutableStateOf(message.text) }
-    // Entrada suave: cada mensagem sobe alguns dp enquanto aparece, como nos apps de chat.
-    val appear = remember(message.id) { Animatable(0f) }
-    LaunchedEffect(message.id) {
-        appear.animateTo(1f, tween(durationMillis = 320, easing = FastOutSlowInEasing))
-    }
+    // Copiar/Editar/Regenerar só aparecem ao tocar na bolha: a conversa fica limpa.
+    var showActions by remember(message.id) { mutableStateOf(false) }
     val streaming = message.status == ChatMessageStatus.STREAMING
+    val bubbleShape = if (isUser) RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp) else RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp)
     Row(
-        modifier = Modifier
+        // Fades up once per message for this process: scrolling back does not replay it.
+        modifier = placement
             .fillMaxWidth()
-            .graphicsLayer {
-                alpha = appear.value
-                translationY = (1f - appear.value) * 14.dp.toPx()
-            },
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.spacedBy(12.dp),
+            .appearOnce(key = "msg:${message.id}"),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        if (!isUser) RefratorAvatar(active = streaming)
-        Column(
-            modifier = if (isUser) Modifier.padding(start = 56.dp) else Modifier.weight(1f),
-            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            if (!isUser) {
-                Row(
-                    modifier = Modifier.padding(top = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Text(
-                        text = "refrator",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = WorkbenchTokens.Text,
-                    )
-                    AnimatedVisibility(visible = streaming, enter = fadeIn(), exit = fadeOut()) {
-                        Text(
-                            text = if (message.text.isEmpty()) "analisando…" else "escrevendo…",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = WorkbenchTokens.TextMuted,
-                        )
-                    }
-                }
-                if (message.reasoning.isNotBlank()) {
-                    ReasoningBlock(reasoning = message.reasoning, messageId = message.id)
+        if (!isUser) {
+            // The mascot reacts to this reply: straining on long thinks, confused while waiting on
+            // the user, annoyed on errors and briefly happy right after finishing.
+            var now by remember { mutableStateOf(System.currentTimeMillis()) }
+            LaunchedEffect(streaming) {
+                while (streaming) {
+                    delay(1_000)
+                    now = System.currentTimeMillis()
                 }
             }
-            when {
-                !isUser && message.text.isEmpty() && streaming ->
-                    ThinkingIndicator(hint = thinkingHint, reasoning = message.reasoning)
-
-                editing -> {
-                    OutlinedTextField(
-                        value = editDraft,
-                        onValueChange = { editDraft = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        textStyle = MaterialTheme.typography.bodyLarge,
-                        shape = RoundedCornerShape(18.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = WorkbenchTokens.Border,
-                            unfocusedBorderColor = WorkbenchTokens.BorderSoft,
-                            cursorColor = WorkbenchTokens.Gold,
-                        ),
-                    )
-                    Row(horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                        MessageAction("Cancelar") { editing = false }
-                        MessageAction("Salvar") {
-                            editing = false
-                            val newText = editDraft.trim()
-                            if (newText.isNotEmpty()) onEdit?.invoke(newText)
-                        }
+            var sawStreaming by remember(message.id) { mutableStateOf(streaming) }
+            var celebrating by remember(message.id) { mutableStateOf(false) }
+            LaunchedEffect(message.status) {
+                if (message.status == ChatMessageStatus.STREAMING) sawStreaming = true
+                if (sawStreaming && message.status == ChatMessageStatus.COMPLETE && message.error == null) {
+                    celebrating = true
+                    delay(3_500)
+                    celebrating = false
+                }
+            }
+            val failed = message.error != null && message.error != ConnectivityMonitor.OFFLINE_MESSAGE
+            val mood = when {
+                failed -> MascotMood.ANNOYED
+                awaitingUser -> MascotMood.CONFUSED
+                streaming && message.text.isEmpty() && message.createdAtMillis > 0 &&
+                    now - message.createdAtMillis > 6_000 -> MascotMood.THINKING_HARD
+                streaming -> MascotMood.WORKING
+                celebrating -> MascotMood.HAPPY
+                else -> MascotMood.IDLE
+            }
+            MascotAvatar(
+                index = mascot,
+                size = 36.dp,
+                active = streaming,
+                mood = mood,
+                activity = activityForTool(currentTool),
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Column(
+            modifier = if (isUser) Modifier.padding(start = 56.dp) else Modifier.weight(1f, fill = false).padding(end = 20.dp),
+            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            val hasThought = message.reasoning.isNotBlank() || message.thinkingTrail.isNotEmpty() || message.thinkingMillis > 0
+            if (!isUser && hasThought && !(streaming && message.text.isEmpty())) {
+                ThoughtSummary(message, Mascots.of(mascot).accent)
+            }
+            if (editing) {
+                OutlinedTextField(
+                    value = editDraft,
+                    onValueChange = { editDraft = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = MaterialTheme.typography.bodyLarge,
+                    shape = RoundedCornerShape(18.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = WorkbenchTokens.Border,
+                        unfocusedBorderColor = WorkbenchTokens.BorderSoft,
+                        cursorColor = WorkbenchTokens.Text,
+                    ),
+                )
+                Row(horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                    MessageAction("Cancelar") { editing = false }
+                    MessageAction("Salvar") {
+                        editing = false
+                        val newText = editDraft.trim()
+                        if (newText.isNotEmpty()) onEdit?.invoke(newText)
                     }
                 }
-
-                isUser -> Column(
+            } else {
+                Column(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(WorkbenchTokens.UserBubble)
-                        .border(1.dp, WorkbenchTokens.UserBubbleBorder, RoundedCornerShape(22.dp))
+                        .clip(bubbleShape)
+                        .background(if (isUser) WorkbenchTokens.UserBubble else WorkbenchTokens.Surface)
+                        .border(1.dp, if (isUser) WorkbenchTokens.UserBubbleBorder else WorkbenchTokens.BorderSoft, bubbleShape)
+                        .clickable(enabled = !streaming) { showActions = !showActions }
+                        .animateContentSize()
                         .padding(start = 16.dp, end = 14.dp, top = 12.dp, bottom = 8.dp),
-                    horizontalAlignment = Alignment.End,
                 ) {
-                    Box(modifier = Modifier.align(Alignment.Start)) { MessageBody(message.text) }
-                    if (message.createdAtMillis > 0) {
+                    when {
+                        !isUser && message.text.isEmpty() && streaming ->
+                            Box(modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onOpenInspector)) {
+                                ThinkingIndicator(hint = thinkingHint, reasoning = message.reasoning)
+                            }
+
+                        !isUser && streaming ->
+                            // Sem isso o TalkBack fica mudo enquanto o modelo escreve.
+                            Box(modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
+                                MessageBody(message.text)
+                            }
+
+                        isUser && workspaceRoot != null && message.text.contains(ATTACHMENT_MANIFEST_MARKER) -> {
+                            val parsed = parseAttachmentManifest(message.text)
+                            val images = parsed.relativePaths.filter(::isImagePath).map { File(workspaceRoot, it) }
+                            val others = parsed.relativePaths.filterNot(::isImagePath)
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (images.isNotEmpty()) {
+                                    AttachmentGallery(files = images, onOpen = { index -> onOpenImages(images, index) })
+                                }
+                                others.forEach { FileAttachmentChip(name = it.substringAfterLast('/')) }
+                                if (parsed.visibleText.isNotBlank()) MessageBody(parsed.visibleText)
+                            }
+                        }
+
+                        else -> MessageBody(message.text)
+                    }
+                    if (message.createdAtMillis > 0 && !(streaming && message.text.isEmpty())) {
                         Row(
+                            modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
                         ) {
-                            Text(
-                                text = messageClock(message.createdAtMillis),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = WorkbenchTokens.TextMuted,
-                            )
-                            Text(text = "✓✓", style = MaterialTheme.typography.labelSmall, color = WorkbenchTokens.TextMuted)
+                            Text(messageClock(message.createdAtMillis), style = MaterialTheme.typography.labelSmall, color = WorkbenchTokens.TextMuted)
+                            if (isUser) Text("✓✓", style = MaterialTheme.typography.labelSmall, color = Color(0xFF8B7CFF))
                         }
                     }
                 }
-
-                streaming ->
-                    // Sem isso o TalkBack fica mudo enquanto o modelo escreve.
-                    Box(modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
-                        MessageBody(message.text)
-                    }
-
-                else -> MessageBody(message.text)
             }
             message.error?.let { error ->
                 // Ficar sem rede não é falha: a missão foi estacionada e o Android retoma sozinho,
@@ -1868,7 +2024,7 @@ private fun ChatMessageBubble(
                 val waitingForNetwork = error == ConnectivityMonitor.OFFLINE_MESSAGE
                 Surface(
                     color = if (waitingForNetwork) WorkbenchTokens.SkySoft else MaterialTheme.colorScheme.errorContainer,
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(14.dp),
                 ) {
                     Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
                         Text(
@@ -1883,9 +2039,9 @@ private fun ChatMessageBubble(
                 }
             }
             AnimatedVisibility(
-                visible = !streaming && message.text.isNotBlank() && !editing,
-                enter = fadeIn(tween(220)),
-                exit = fadeOut(tween(120)),
+                visible = showActions && !streaming && message.text.isNotBlank() && !editing,
+                enter = fadeIn(tween(180)) + expandVertically(),
+                exit = fadeOut(tween(120)) + shrinkVertically(),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MessageAction("Copiar", onCopy)
@@ -2461,6 +2617,67 @@ private fun CodeBlock(language: String, code: String) {
     }
 }
 
+/**
+ * "Pensou por 12 s ›": a compact record of how the model got to the answer, kept after it
+ * finishes. Expands into the steps it went through and, when the provider streams it, the
+ * reasoning text itself.
+ */
+@Composable
+private fun ThoughtSummary(message: ChatMessage, accent: Color) {
+    var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
+    val seconds = message.thinkingMillis / 1_000
+    val label = when {
+        message.thinkingMillis <= 0 -> "Pensamento"
+        seconds < 1 -> "Pensou por menos de 1 s"
+        seconds < 60 -> "Pensou por $seconds s"
+        else -> "Pensou por ${seconds / 60} min ${seconds % 60} s"
+    }
+    val turn by animateFloatAsState(if (expanded) 90f else 0f, label = "thoughtChevron")
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable { expanded = !expanded }
+            .animateContentSize()
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(modifier = Modifier.size(7.dp).background(accent, CircleShape))
+            Text(label, style = MaterialTheme.typography.labelLarge, color = WorkbenchTokens.TextMuted)
+            Icon(
+                painter = painterResource(R.drawable.ic_chevron_right),
+                contentDescription = if (expanded) "Recolher pensamento" else "Ver pensamento",
+                modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = turn },
+                tint = WorkbenchTokens.TextFaint,
+            )
+        }
+        AnimatedVisibility(visible = expanded) {
+            Column(
+                modifier = Modifier
+                    .padding(start = 3.dp, top = 8.dp)
+                    .drawBehind {
+                        drawLine(accent.copy(alpha = 0.35f), Offset(0f, 0f), Offset(0f, size.height), 2.dp.toPx())
+                    }
+                    .padding(start = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                message.thinkingTrail.forEach { step ->
+                    Text(step, style = MaterialTheme.typography.bodySmall, color = WorkbenchTokens.Text)
+                }
+                if (message.reasoning.isNotBlank()) {
+                    Text(message.reasoning, style = MaterialTheme.typography.bodySmall, color = WorkbenchTokens.TextMuted)
+                }
+                if (message.thinkingTrail.isEmpty() && message.reasoning.isBlank()) {
+                    Text(
+                        text = "Este provedor não envia o texto do raciocínio; só o tempo fica registrado.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WorkbenchTokens.TextFaint,
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ReasoningBlock(reasoning: String, messageId: String) {
     var expanded by rememberSaveable(messageId) { mutableStateOf(false) }
@@ -2706,7 +2923,7 @@ private fun ToolActivityRow(activity: ToolActivity) {
     }
 }
 
-private fun toolActivityHeadline(activity: ToolActivity): String {
+internal fun toolActivityHeadline(activity: ToolActivity): String {
     val (running, complete) = when (activity.toolName) {
         "android_shell" -> "Executando comandos" to "Executou comandos"
         "adb_shell" -> "Executando comando ADB" to "Executou comando ADB"
@@ -2734,6 +2951,43 @@ private fun toolActivityHeadline(activity: ToolActivity): String {
         "external_tree_read" -> "Lendo arquivo externo" to "Leu arquivo externo"
         "external_tree_write" -> "Editando arquivo externo" to "Editou arquivo externo"
         "capture_app_screen" -> "Capturando a tela" to "Capturou a tela"
+        "accessibility_screen_text" -> "Lendo a tela" to "Leu a tela"
+        "society_overview" -> "Olhando a Sociedade Prisma" to "Viu a Sociedade Prisma"
+        "prisma_ask" -> "Perguntando a outro Prisma" to "Ouviu outro Prisma"
+        "prisma_create" -> "Criando um Prisma" to "Criou um Prisma"
+        "routine_create" -> "Agendando rotina" to "Agendou rotina"
+        "routine_delete" -> "Removendo rotina" to "Removeu rotina"
+        "group_create" -> "Criando grupo" to "Criou grupo"
+        "group_post" -> "Publicando no grupo" to "Publicou no grupo"
+        "notify_user" -> "Mandando aviso" to "Mandou aviso"
+        "task_board" -> "Atualizando o quadro" to "Atualizou o quadro"
+        "team_notebook_write" -> "Anotando no caderno do time" to "Anotou no caderno do time"
+        "team_notebook_read" -> "Lendo o caderno do time" to "Leu o caderno do time"
+        "prisma_dm" -> "Mandando mensagem privada" to "Mandou mensagem privada"
+        "web_serve" -> "Subindo servidor local" to "Serviu no servidor local"
+        "look_at_image" -> "Olhando a imagem" to "Olhou a imagem"
+        "wake_me" -> "Programando para acordar" to "Vai acordar sozinho"
+        "shadow_open_url" -> "Abrindo endereço na tela" to "Abriu endereço na tela"
+        "shadow_actions" -> "Usando a tela" to "Usou a tela"
+        "shadow_screen_text" -> "Lendo a tela própria" to "Leu a tela própria"
+        "shadow_clear_text" -> "Limpando o campo" to "Limpou o campo"
+        "notebook_write" -> "Anotando no caderno" to "Anotou no caderno"
+        "notebook_read" -> "Lendo o caderno" to "Leu o caderno"
+        "notebook_done" -> "Atualizando o caderno" to "Atualizou o caderno"
+        "group_read" -> "Lendo o grupo" to "Leu o grupo"
+        "private_message" -> "Mandando mensagem no privado" to "Mandou mensagem no privado"
+        "whatsapp_send" -> "Preparando WhatsApp" to "Preparou WhatsApp"
+        "calendar_list" -> "Lendo a agenda" to "Leu a agenda"
+        "calendar_add" -> "Criando evento" to "Criou evento"
+        "alarm_set", "timer_set" -> "Programando o relógio" to "Programou o relógio"
+        "settings_open" -> "Abrindo configurações" to "Abriu configurações"
+        "maps_open" -> "Abrindo o mapa" to "Abriu o mapa"
+        "sms_draft" -> "Preparando SMS" to "Preparou SMS"
+        "phone_dial" -> "Abrindo o discador" to "Abriu o discador"
+        "email_compose" -> "Preparando e-mail" to "Preparou e-mail"
+        "app_open" -> "Abrindo app" to "Abriu app"
+        "accessibility_snapshot" -> "Inspecionando a tela" to "Inspecionou a tela"
+        "accessibility_action", "accessibility_gesture" -> "Tocando na tela" to "Tocou na tela"
         "ocr_image" -> "Lendo imagem com OCR" to "Leu imagem com OCR"
         "runtime_inventory" -> "Verificando runtimes" to "Verificou runtimes"
         "runtime_pack_catalog" -> "Consultando packs de runtime" to "Consultou packs de runtime"
@@ -2942,10 +3196,13 @@ private fun Composer(
     onAttachMenuChange: (Boolean) -> Unit,
     onAttachFile: () -> Unit,
     onAttachPhoto: () -> Unit,
+    onVoice: () -> Unit = {},
+    accent: Color = Color(0xFF8B7CFF),
+    thumbnailRoot: File? = null,
 ) {
     val interactionsLocked = !sessionReady || isStreaming || pendingInteraction || attachBusy
     val sendEnabled = (prompt.isNotBlank() || attachments.isNotEmpty()) && !interactionsLocked
-    val composerEdge = if (isStreaming) {
+    val pillEdge = if (isStreaming) {
         val breath = rememberInfiniteTransition(label = "composerInk")
         val glow by breath.animateFloat(
             initialValue = 0f,
@@ -2953,162 +3210,145 @@ private fun Composer(
             animationSpec = infiniteRepeatable(tween(1_400, easing = FastOutSlowInEasing), RepeatMode.Reverse),
             label = "composerInkGlow",
         )
-        lerp(WorkbenchTokens.Border, InkTokens.Glint, glow)
+        lerp(WorkbenchTokens.BorderSoft, InkTokens.Glint, glow)
     } else {
-        WorkbenchTokens.Border
+        WorkbenchTokens.BorderSoft
     }
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(WorkbenchTokens.Canvas)
-            // Nenhum inset aqui: quem trata teclado e barra de navegação é a área de conteúdo
-            // inteira, no MainActivity. Ter inset nos dois lugares era a contagem dupla.
-            .padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 6.dp),
+            // Nenhum inset aqui: quem trata teclado e barra de navegação é o MainActivity.
+            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
-            shape = RoundedCornerShape(28.dp),
-            color = WorkbenchTokens.Surface,
-            border = BorderStroke(1.dp, composerEdge),
-        ) {
-            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)) {
-                if (attachments.isNotEmpty()) {
+        if (attachments.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(start = 58.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                attachments.forEach { attachment ->
+                    val entrance = remember(attachment.relativePath) { Animatable(0.7f) }
+                    LaunchedEffect(attachment.relativePath) {
+                        entrance.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
+                    }
                     Row(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(start = 54.dp, bottom = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            .graphicsLayer {
+                                scaleX = entrance.value
+                                scaleY = entrance.value
+                            }
+                            .background(WorkbenchTokens.SurfaceHigh, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        attachments.forEach { attachment ->
-                            // Leve overshoot ao entrar: confirma visualmente "anexado".
-                            val entrance = remember(attachment.relativePath) { Animatable(0.7f) }
-                            LaunchedEffect(attachment.relativePath) {
-                                entrance.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
-                            }
-                            Row(
-                                modifier = Modifier
-                                    .graphicsLayer {
-                                        scaleX = entrance.value
-                                        scaleY = entrance.value
-                                    }
-                                    .background(WorkbenchTokens.SurfaceHigh, RoundedCornerShape(12.dp))
-                                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                Icon(
-                                    painter = painterResource(if (attachment.isImage) R.drawable.ic_folder else R.drawable.ic_doc),
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                    tint = WorkbenchTokens.TextMuted,
-                                )
-                                Text(
-                                    text = attachment.displayName,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = WorkbenchTokens.Text,
-                                    maxLines = 1,
-                                    modifier = Modifier.widthIn(max = 120.dp),
-                                )
-                                Text(
-                                    text = "×",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = WorkbenchTokens.TextMuted,
-                                    modifier = Modifier
-                                        .clickable { onRemoveAttachment(attachment) }
-                                        .semantics { contentDescription = "Remover ${attachment.displayName}" },
-                                )
-                            }
-                        }
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box {
-                        Box(
-                            modifier = Modifier
-                                .size(46.dp)
-                                .clip(CircleShape)
-                                .background(WorkbenchTokens.SurfaceHigh)
-                                .clickable(enabled = !interactionsLocked) { onAttachMenuChange(true) }
-                                .semantics { contentDescription = "Anexar arquivo ou foto" },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = "+",
-                                color = if (interactionsLocked) WorkbenchTokens.TextFaint else WorkbenchTokens.Text,
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Light,
+                        if (attachment.isImage && thumbnailRoot != null) {
+                            AttachmentThumb(file = File(thumbnailRoot, attachment.relativePath), size = 34.dp, corner = 8.dp)
+                        } else {
+                            Icon(
+                                painter = painterResource(if (attachment.isImage) R.drawable.ic_camera else R.drawable.ic_doc),
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = WorkbenchTokens.TextMuted,
                             )
                         }
-                        DropdownMenu(expanded = attachMenuOpen, onDismissRequest = { onAttachMenuChange(false) }) {
-                            DropdownMenuItem(text = { Text("Anexar arquivo") }, onClick = onAttachFile)
-                            DropdownMenuItem(text = { Text("Anexar foto") }, onClick = onAttachPhoto)
-                        }
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(
+                        Text(
+                            text = attachment.displayName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = WorkbenchTokens.Text,
+                            maxLines = 1,
+                            modifier = Modifier.widthIn(max = 120.dp),
+                        )
+                        Text(
+                            text = "×",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = WorkbenchTokens.TextMuted,
                             modifier = Modifier
-                                .padding(start = 4.dp)
-                                .clip(RoundedCornerShape(50))
-                                .background(WorkbenchTokens.SurfaceHigh)
-                                .clickable(onClick = onContextClick)
-                                .padding(horizontal = 12.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(7.dp),
-                        ) {
-                            // One of the few red details: the "live context" dot.
-                            Box(modifier = Modifier.size(8.dp).background(WorkbenchTokens.Gold, CircleShape))
-                            Text("Contexto ($contextCount)", style = MaterialTheme.typography.labelLarge, color = WorkbenchTokens.Text)
-                            Text("›", style = MaterialTheme.typography.labelLarge, color = WorkbenchTokens.TextMuted)
-                        }
-                        TextField(
-                            value = prompt,
-                            onValueChange = onPromptChange,
-                            enabled = !interactionsLocked,
-                            modifier = Modifier.fillMaxWidth(),
-                            placeholder = {
-                                Text(
-                                    if (isStreaming) "Aguardando o agente…" else "Digite sua mensagem…",
-                                    color = WorkbenchTokens.TextFaint,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                )
-                            },
-                            textStyle = MaterialTheme.typography.bodyLarge,
-                            minLines = 1,
-                            maxLines = 8,
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                disabledContainerColor = Color.Transparent,
-                                focusedIndicatorColor = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent,
-                                disabledIndicatorColor = Color.Transparent,
-                                cursorColor = WorkbenchTokens.Text,
-                                focusedTextColor = WorkbenchTokens.Text,
-                                unfocusedTextColor = WorkbenchTokens.Text,
-                                disabledTextColor = WorkbenchTokens.TextMuted,
-                            ),
+                                .clickable { onRemoveAttachment(attachment) }
+                                .semantics { contentDescription = "Remover ${attachment.displayName}" },
                         )
                     }
-                    ComposerTuneButton(
-                        // Trocar modo ou raciocínio no meio de um turno recriaria o toolbox em uso.
-                        enabled = !isStreaming,
-                        executionMode = executionMode,
-                        reasoningEffort = reasoningEffort,
-                        reasoningSupported = reasoningSupported,
-                        onExecutionModeChange = onExecutionModeChange,
-                        onReasoningEffortChange = onReasoningEffortChange,
-                    )
-                    SendButton(
-                        isStreaming = isStreaming,
-                        sendEnabled = sendEnabled,
-                        onClick = { if (isStreaming) onStop() else onSend() },
-                    )
                 }
             }
+        }
+        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box {
+                Box(
+                    modifier = Modifier
+                        .size(50.dp)
+                        .clip(CircleShape)
+                        .background(WorkbenchTokens.Surface)
+                        .border(1.dp, WorkbenchTokens.BorderSoft, CircleShape)
+                        .clickable(enabled = !interactionsLocked) { onAttachMenuChange(true) }
+                        .semantics { contentDescription = "Anexar" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("+", color = if (interactionsLocked) WorkbenchTokens.TextFaint else WorkbenchTokens.Text, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Light)
+                }
+                DropdownMenu(expanded = attachMenuOpen, onDismissRequest = { onAttachMenuChange(false) }) {
+                    DropdownMenuItem(text = { Text("Anexar arquivo") }, onClick = onAttachFile)
+                    DropdownMenuItem(text = { Text("Anexar foto") }, onClick = onAttachPhoto)
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 50.dp)
+                    .clip(RoundedCornerShape(25.dp))
+                    .background(WorkbenchTokens.Surface)
+                    .border(1.dp, pillEdge, RoundedCornerShape(25.dp))
+                    .animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextField(
+                    value = prompt,
+                    onValueChange = onPromptChange,
+                    enabled = !interactionsLocked,
+                    modifier = Modifier.weight(1f),
+                    placeholder = {
+                        Text(
+                            if (isStreaming) "Aguardando resposta…" else "Digite uma mensagem…",
+                            color = WorkbenchTokens.TextFaint,
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    },
+                    textStyle = MaterialTheme.typography.bodyLarge,
+                    minLines = 1,
+                    maxLines = 6,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        disabledIndicatorColor = Color.Transparent,
+                        cursorColor = WorkbenchTokens.Text,
+                        focusedTextColor = WorkbenchTokens.Text,
+                        unfocusedTextColor = WorkbenchTokens.Text,
+                        disabledTextColor = WorkbenchTokens.TextMuted,
+                    ),
+                )
+                ComposerIcon(R.drawable.ic_attach, "Anexar arquivo", enabled = !interactionsLocked, onClick = onAttachFile)
+                ComposerIcon(R.drawable.ic_camera, "Anexar foto", enabled = !interactionsLocked, onClick = onAttachPhoto)
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+            SendButton(
+                isStreaming = isStreaming,
+                sendEnabled = sendEnabled,
+                voiceEnabled = !interactionsLocked,
+                accent = accent,
+                onClick = {
+                    when {
+                        isStreaming -> onStop()
+                        sendEnabled -> onSend()
+                        else -> onVoice()
+                    }
+                },
+            )
         }
         val notice = when {
             attachError != null -> attachError to MaterialTheme.colorScheme.error
@@ -3122,26 +3362,35 @@ private fun Composer(
             exit = fadeOut(tween(120)) + shrinkVertically(),
         ) {
             notice?.let { (text, color) ->
-                Text(
-                    text = text,
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = color,
-                )
+                Text(text = text, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, style = MaterialTheme.typography.labelSmall, color = color)
             }
         }
         ContextUsageFooter(
             usage = contextUsage,
             windowTokens = contextWindowTokens,
             compactionThresholdPercent = compactionThresholdPercent,
+            accent = accent,
         )
+    }
+}
+
+@Composable
+private fun ComposerIcon(icon: Int, description: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .semantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(painterResource(icon), contentDescription = null, modifier = Modifier.size(21.dp), tint = if (enabled) WorkbenchTokens.TextMuted else WorkbenchTokens.TextFaint)
     }
 }
 
 /** Ajustes da conversa: modo de permissões e nível de raciocínio, num único menu. */
 @Composable
-private fun ComposerTuneButton(
+internal fun ComposerTuneButton(
     enabled: Boolean,
     executionMode: ExecutionMode,
     reasoningEffort: ReasoningEffort,
@@ -3227,130 +3476,126 @@ private fun ComposerTuneButton(
     }
 }
 
-/** Círculo claro com avião de papel (enviar) que vira quadrado (parar) durante a geração. */
+/** Microfone com o campo vazio, avião de papel com texto, quadrado (parar) durante a geração. */
 @Composable
 private fun SendButton(
     isStreaming: Boolean,
     sendEnabled: Boolean,
+    voiceEnabled: Boolean,
+    accent: Color,
     onClick: () -> Unit,
 ) {
-    val active = isStreaming || sendEnabled
-    val background by animateColorAsState(
-        targetValue = if (active) WorkbenchTokens.Text else WorkbenchTokens.SurfaceHigh,
-        animationSpec = tween(180),
-        label = "sendBackground",
-    )
+    val active = isStreaming || sendEnabled || voiceEnabled
+    val pressSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val pressed by pressSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (active) 1f else 0.92f,
+        targetValue = when {
+            pressed -> 0.86f
+            active -> 1f
+            else -> 0.92f
+        },
         animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
         label = "sendScale",
     )
+    val state = when {
+        isStreaming -> 2
+        sendEnabled -> 1
+        else -> 0
+    }
     Box(
         modifier = Modifier
-            .size(48.dp)
+            .size(52.dp)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
             }
             .clip(CircleShape)
-            .background(background)
-            .clickable(enabled = active, onClick = onClick)
-            .semantics { contentDescription = if (isStreaming) "Parar geração" else "Enviar mensagem" },
+            .background(if (active) accent else WorkbenchTokens.SurfaceHigh)
+            .clickable(
+                interactionSource = pressSource,
+                indication = androidx.compose.foundation.LocalIndication.current,
+                enabled = active,
+                onClick = onClick,
+            )
+            .semantics {
+                contentDescription = when (state) {
+                    2 -> "Parar geração"
+                    1 -> "Enviar mensagem"
+                    else -> "Ditar por voz"
+                }
+            },
         contentAlignment = Alignment.Center,
     ) {
         AnimatedContent(
-            targetState = isStreaming,
+            targetState = state,
             transitionSpec = {
                 (fadeIn(tween(160)) + scaleIn(tween(160), initialScale = 0.6f)) togetherWith
                     (fadeOut(tween(100)) + scaleOut(tween(100), targetScale = 0.6f))
             },
             label = "sendIcon",
-        ) { streaming ->
-            if (streaming) {
-                Box(modifier = Modifier.size(13.dp).background(WorkbenchTokens.Canvas, RoundedCornerShape(3.dp)))
-            } else {
-                Icon(
-                    painter = painterResource(R.drawable.ic_send),
-                    contentDescription = null,
-                    modifier = Modifier.size(22.dp),
-                    tint = if (active) WorkbenchTokens.Canvas else WorkbenchTokens.TextFaint,
-                )
+        ) { current ->
+            when (current) {
+                2 -> Box(modifier = Modifier.size(14.dp).background(Color.White, RoundedCornerShape(3.dp)))
+                1 -> Icon(painterResource(R.drawable.ic_send), contentDescription = null, modifier = Modifier.size(22.dp), tint = Color.White)
+                else -> Icon(painterResource(R.drawable.ic_mic), contentDescription = null, modifier = Modifier.size(24.dp), tint = Color.White)
             }
         }
     }
 }
 
-/** Rodapé: quanto da janela de contexto do modelo esta conversa já ocupa. */
+/** Rodapé: barra segmentada de quanto da janela de contexto a conversa já ocupa. */
 @Composable
 private fun ContextUsageFooter(
     usage: ContextUsage?,
     windowTokens: Int,
     compactionThresholdPercent: Int?,
+    accent: Color,
 ) {
     var details by remember { mutableStateOf(false) }
     val fraction = usage?.let { (it.tokens.toFloat() / windowTokens.coerceAtLeast(1)).coerceIn(0f, 1f) } ?: 0f
     val animated by animateFloatAsState(fraction, animationSpec = tween(600, easing = FastOutSlowInEasing), label = "contextFill")
     Box {
-        Column {
-            HorizontalDivider(color = WorkbenchTokens.BorderSoft)
-            Row(
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .clickable { details = true }
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("contexto", style = MaterialTheme.typography.labelSmall, color = WorkbenchTokens.TextFaint)
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { details = true }
-                    .padding(horizontal = 6.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    .weight(1f)
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(WorkbenchTokens.SurfaceHigh),
             ) {
                 Box(
                     modifier = Modifier
-                        .width(110.dp)
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(50))
-                        .background(WorkbenchTokens.SurfaceHigh),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .fillMaxWidth(animated)
-                            .background(if (fraction >= 0.85f) WorkbenchTokens.Red else WorkbenchTokens.Gold),
-                    )
-                }
-                Spacer(modifier = Modifier.weight(1f))
-                Text("Contexto usado", style = MaterialTheme.typography.labelMedium, color = WorkbenchTokens.TextMuted)
-                Text(
-                    text = "${usage?.let { (if (it.exact) "" else "~") + compactTokens(it.tokens) } ?: "0"} / ${compactTokens(windowTokens.toLong())}",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = WorkbenchTokens.Text,
-                )
-                Icon(
-                    painter = painterResource(R.drawable.ic_chevron_right),
-                    contentDescription = "Detalhes do contexto",
-                    modifier = Modifier.size(16.dp),
-                    tint = WorkbenchTokens.TextMuted,
+                        .fillMaxHeight()
+                        .fillMaxWidth(animated)
+                        .background(if (fraction >= 0.85f) WorkbenchTokens.Red else accent),
                 )
             }
+            Text(
+                text = "${usage?.let { (if (it.exact) "" else "~") + compactTokens(it.tokens) } ?: "0"} / ${compactTokens(windowTokens.toLong())}",
+                style = MaterialTheme.typography.labelSmall,
+                color = WorkbenchTokens.TextMuted,
+            )
         }
         DropdownMenu(expanded = details, onDismissRequest = { details = false }) {
-            Column(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Uso de contexto", fontWeight = FontWeight.SemiBold)
                 Text(
-                    text = usage?.let { "%,d tokens%s".format(it.tokens, if (it.exact) "" else " (estimado)") }
-                        ?: "Nenhuma mensagem enviada ainda",
+                    text = usage?.let { "%,d tokens%s".format(it.tokens, if (it.exact) "" else " (estimado)") } ?: "Nenhuma mensagem enviada ainda",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Text(
-                    text = "Janela do modelo: %,d tokens".format(windowTokens),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = WorkbenchTokens.TextMuted,
-                )
+                Text("Janela do modelo: %,d tokens".format(windowTokens), style = MaterialTheme.typography.bodySmall, color = WorkbenchTokens.TextMuted)
                 Text(
                     text = compactionThresholdPercent?.let { "Compactação automática ao atingir $it%" }
-                        ?: "Compactação automática desligada (Configurações › Chat contínuo)",
+                        ?: "Compactação automática desligada (Perfil › Chat contínuo)",
                     style = MaterialTheme.typography.labelSmall,
                     color = WorkbenchTokens.TextMuted,
                 )
@@ -3358,6 +3603,8 @@ private fun ContextUsageFooter(
         }
     }
 }
+
+private const val TOKEN_SEGMENTS = 18
 
 internal data class ContextUsage(val tokens: Long, val exact: Boolean)
 
@@ -3561,6 +3808,7 @@ private fun statusFor(event: ProviderEvent): String =
         is ProviderEvent.ModelResolved -> "Modelo confirmado: ${event.modelId}"
         is ProviderEvent.ReasoningDelta -> "Pensando…"
         is ProviderEvent.TextDelta -> "Escrevendo resposta…"
+        is ProviderEvent.RateLimits -> "Limites de uso recebidos."
         is ProviderEvent.Usage -> "Uso de tokens recebido."
         is ProviderEvent.Continuation -> "Estado do provider recebido."
         is ProviderEvent.Completed -> "Resposta concluída · ${event.finishReason}"
